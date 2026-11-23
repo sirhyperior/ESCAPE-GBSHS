@@ -8,14 +8,17 @@
   } = map;
   const MIN_ROUTE = 26;
   const MIN_GUARD_DISTANCE = 12;
-  const GUARD_COUNTS = [0, 5, 4, 3, 2, 2];
+  const GUARD_COUNTS = [0, 4, 3, 3, 2, 1];
   const PLAYER_RADIUS = 0.25;
   const GUARD_RADIUS = 0.24;
   const WALK_SPEED = 3;
   const EXHAUSTED_SPEED = 1.8;
   const RUN_SPEED = 5;
   const PATROL_SPEED = 2.35;
-  const CHASE_SPEED = 4.1;
+  const CHASE_SPEED = 3.7;
+  const PATROL_TURN_SPEED = 6.2;
+  const CHASE_TURN_SPEED = 9.4;
+  const NOTICE_TIME = 0.75;
   const MAX_STAMINA = 3;
   const RECOVERY_DELAY = 0.75;
   const RECOVERY_RATE = MAX_STAMINA / 4;
@@ -47,21 +50,34 @@
     const layout = createLayout(random, kind);
     const { tiles, rooms, routes } = layout;
     const [main, bypass] = routes;
-    const ends = [main[0], main.at(-1)];
-    const goalTile = choose(ends, random);
-    const otherEnd = ends.find(tile => tile !== goalTile);
-    const fromEnd = walkableTiles(tiles, otherEnd).distance;
-    const fromGoal = walkableTiles(tiles, goalTile).distance;
-    const bedrooms = rooms.filter(room => !room.lounge && fromGoal[room.tile] >= MIN_ROUTE);
-    bedrooms.sort((a, b) => fromEnd[a.tile] - fromEnd[b.tile]);
-    const spawnTile = choose(bedrooms.slice(0, 2), random).tile;
+    const bedrooms = rooms.filter(room => !room.lounge);
+    const ends = [main[0], main.at(-1)].map(tile => {
+      const { distance } = walkableTiles(tiles, tile);
+      const farthest = Math.max(...bedrooms.map(room => distance[room.tile]));
+      return { tile, distance, farthest };
+    });
+    let goal = choose(ends, random);
+    let entry = ends.find(end => end !== goal);
+    if (goal.farthest < MIN_ROUTE && entry.farthest > goal.farthest) {
+      [goal, entry] = [entry, goal];
+    }
+    const minimum = Math.min(MIN_ROUTE, goal.farthest);
+    const starts = bedrooms.filter(room => goal.distance[room.tile] >= minimum);
+    starts.sort((a, b) => entry.distance[a.tile] - entry.distance[b.tile]);
+    const spawnTile = choose(starts.slice(0, 2), random).tile;
+    const goalTile = goal.tile;
     const goalTiles = [goalTile - WIDTH, goalTile, goalTile + WIDTH];
     const lookouts = doorwayLookouts(rooms, routes);
     const floor = { ...layout, number, spawnTile, goalTile, goalTiles, lookouts, random, guards: [] };
 
     const distance = walkableTiles(tiles, spawnTile).distance;
     const count = GUARD_COUNTS[number];
-    const hallway = main.slice(3, -3);
+    // Floor 5 leaves the entry half of the main corridor open for learning the controls.
+    const middle = Math.floor(main.length / 2);
+    const entranceAtStart = goalTile === main.at(-1);
+    const patrolStart = number === 5 && entranceAtStart ? middle : 3;
+    const patrolEnd = number === 5 && !entranceAtStart ? middle : main.length - 3;
+    const hallway = main.slice(patrolStart, patrolEnd);
     const exit = tileCenter(goalTile);
     const safe = tile => {
       const point = tileCenter(tile);
@@ -71,7 +87,7 @@
     const sideSpawns = bypass.filter(safe);
     const occupied = new Set();
     for (let index = 0; index < count; index += 1) {
-      const useBypass = index === count - 1 && sideSpawns.some(tile => !occupied.has(tile));
+      const useBypass = index > 0 && index === count - 1 && sideSpawns.some(tile => !occupied.has(tile));
       const route = useBypass ? bypass : hallway;
       const candidates = shuffle((useBypass ? sideSpawns : hallSpawns).filter(tile => !occupied.has(tile)), random);
       if (index === 0) candidates.sort((a, b) => distance[a] - distance[b]);
@@ -92,6 +108,7 @@
       const guard = {
         ...tileCenter(tile),
         angle: 0,
+        targetAngle: 0,
         mode: 'patrol',
         patrolRoute,
         routeIndex: startIndex - first,
@@ -103,10 +120,11 @@
         pathTarget: -1,
         lastSeen: null,
         unseenTime: 0,
+        noticeTime: 0,
       };
       choosePatrolPath(guard);
       const next = guard.path[guard.pathIndex];
-      guard.angle = Math.atan2(next.y - guard.y, next.x - guard.x);
+      guard.angle = guard.targetAngle = Math.atan2(next.y - guard.y, next.x - guard.x);
       floor.guards.push(guard);
     }
     return floor;
@@ -242,7 +260,7 @@
     const distance = Math.hypot(dx, dy);
     if (distance < EPSILON) return travel;
 
-    guard.angle = Math.atan2(dy, dx);
+    guard.targetAngle = Math.atan2(dy, dx);
     if (distance <= travel) {
       Object.assign(guard, target);
       return travel - distance;
@@ -304,7 +322,7 @@
       const places = floor.lookouts.get(guard.patrolRoute[guard.routeIndex]);
       if (places && guard.lookCooldown === 0 && floor.random() < 0.58) {
         const point = tileCenter(choose(places, floor.random));
-        guard.angle = Math.atan2(point.y - guard.y, point.x - guard.x);
+        guard.targetAngle = Math.atan2(point.y - guard.y, point.x - guard.x);
         guard.lookTime = 0.65;
         guard.lookCooldown = 3 + floor.random() * 2;
         return;
@@ -341,10 +359,28 @@
     if (remaining > EPSILON) moveToward(guard, target, remaining);
   }
 
+  function turnGuard(guard, dt) {
+    const speed = guard.mode === 'patrol' ? PATROL_TURN_SPEED : CHASE_TURN_SPEED;
+    const difference = guard.targetAngle - guard.angle;
+    const shortest = Math.atan2(Math.sin(difference), Math.cos(difference));
+    guard.angle += Math.sign(shortest) * Math.min(Math.abs(shortest), speed * dt);
+  }
+
   function updateGuard(floor, guard, player, dt) {
-    if (seesTarget(floor.tiles, guard, player, guardLight(guard))) {
+    const visible = seesTarget(floor.tiles, guard, player, guardLight(guard));
+    if (guard.mode === 'patrol') {
+      guard.noticeTime = visible ? guard.noticeTime + dt : 0;
+      if (visible && guard.noticeTime < NOTICE_TIME - EPSILON) {
+        guard.targetAngle = Math.atan2(player.y - guard.y, player.x - guard.x);
+        turnGuard(guard, dt);
+        return;
+      }
+    }
+
+    if (visible) {
       if (guard.mode === 'patrol') guard.pathTarget = -1;
       guard.mode = 'chase';
+      guard.noticeTime = 0;
       guard.lastSeen = { x: player.x, y: player.y };
       guard.unseenTime = 0;
     } else if (guard.mode !== 'patrol') {
@@ -355,6 +391,7 @@
 
     if (guard.mode === 'patrol') patrol(floor, guard, dt);
     else pursue(floor, guard, dt);
+    turnGuard(guard, dt);
   }
 
   function step(game, input, dt) {

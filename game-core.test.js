@@ -80,22 +80,25 @@ test('1,600 seeded floors have wide, connected corridors and furnished dorm room
 
       assert.ok(floor.rooms.filter(room => room.lounge).length <= 1);
       for (const room of floor.rooms) {
+        const area = room.width * room.height;
         const { hall, wall, inside } = room.entrance;
         assert.equal(wall.length, 2);
         assert.ok([...hall, ...wall, ...inside].every(tile => floor.tiles[tile] === 0));
         const objects = floor.furniture.filter(object => floor.roomsByTile[core.tileAt(object.x, object.y)] === room.id);
         if (room.lounge) {
           lounges += 1;
+          assert.ok(area >= 30 && area <= 42);
           assert.ok(objects.some(object => object.kind === 'sofa'));
           assert.ok(objects.every(object => object.kind !== 'bunk' && object.kind !== 'wardrobe'));
         } else {
+          assert.ok(area >= 20 && area <= 25);
           assert.equal(objects.filter(object => object.kind === 'bunk').length, 1);
           assert.equal(objects.filter(object => object.kind === 'wardrobe').length, 1);
           assert.ok(objects.length >= 4);
         }
       }
       assert.ok(floor.lookouts.size > 0);
-      assert.equal(floor.guards.length, [0, 5, 4, 3, 2, 2][number]);
+      assert.equal(floor.guards.length, [0, 4, 3, 3, 2, 1][number]);
       const spawns = new Set();
       for (const guard of floor.guards) {
         const spawn = core.tileAt(guard.x, guard.y);
@@ -103,6 +106,11 @@ test('1,600 seeded floors have wide, connected corridors and furnished dorm room
         assert.equal(floor.roomsByTile[spawn], -1);
         assert.ok(guard.patrolRoute.includes(spawn));
         assert.ok(guard.patrolRoute.every(tile => floor.roomsByTile[tile] === -1 && floor.tiles[tile] === 0));
+        if (number === 5) {
+          const middle = Math.floor(main.length / 2);
+          const exitHalf = floor.goalTile === main[0] ? main.slice(0, middle) : main.slice(middle);
+          assert.ok(guard.patrolRoute.every(tile => exitHalf.includes(tile)));
+        }
         spawns.add(spawn);
       }
       assert.equal(spawns.size, floor.guards.length);
@@ -205,6 +213,29 @@ test('exhaustion slows walking and prevents sprinting until a full seven-second 
   assert.ok(Math.abs(game.player.stamina - 2) < 1e-8);
 });
 
+test('breaking sight during the 0.75-second warning resets detection', () => {
+  const game = openFloor();
+  const guard = core.createFloor(5, 0).guards[0];
+  Object.assign(guard, { x: 10.5, y: 10.5, angle: 0, targetAngle: 0, lookTime: 1 });
+  Object.assign(game.player, { x: 14.5, y: 10.5 });
+  game.floor.guards = [guard];
+
+  tick(game, 44);
+  assert.equal(guard.mode, 'patrol');
+  assert.ok(guard.noticeTime > 0.7);
+  const wall = core.tileAt(12, 10);
+  game.floor.tiles[wall] = 1;
+  tick(game, 1);
+  assert.equal(guard.noticeTime, 0);
+  game.floor.tiles[wall] = 0;
+
+  tick(game, 44);
+  assert.equal(guard.mode, 'patrol');
+  tick(game, 1);
+  assert.equal(guard.mode, 'chase');
+  assert.equal(guard.noticeTime, 0);
+});
+
 test('sight expands on detection and each guard clears its alert after 2.5 continuous seconds', () => {
   const game = openFloor();
   const [first, second] = core.createFloor(1, 0).guards;
@@ -214,7 +245,7 @@ test('sight expands on detection and each guard clears its alert after 2.5 conti
 
   Object.assign(game.player, { x: 14.5, y: 10.5 });
   assert.equal(core.guardLight(first).range, 6.5);
-  tick(game, 1);
+  tick(game, 45);
   assert.equal(first.mode, 'chase');
   assert.equal(core.guardLight(first).range, 8.25);
   assert.equal(second.mode, 'patrol');
@@ -253,11 +284,29 @@ test('a patrolling guard pauses in the hall to turn its light into a doorway', (
 
   tick(game, 28);
   assert.equal(guard.mode, 'patrol');
-  assert.equal(guard.angle, Math.PI / 2);
+  assert.ok(guard.angle > 0 && guard.angle < Math.PI / 2);
   assert.ok(guard.lookTime > 0);
   assert.equal(guard.x, 11.5);
-  tick(game, 10);
+  tick(game, 16);
+  assert.ok(Math.abs(guard.angle - Math.PI / 2) < 1e-8);
   assert.equal(guard.x, 11.5);
+});
+
+test('a guard takes the short arc when its heading crosses the angle boundary', () => {
+  const game = openFloor();
+  const guard = core.createFloor(5, 1).guards[0];
+  const angle = Math.PI - 0.055;
+  Object.assign(guard, {
+    x: 10.5, y: 10.5, angle, targetAngle: angle,
+    path: [{ x: 9.5, y: 10.4 }], pathIndex: 0,
+  });
+  Object.assign(game.player, { x: 30.5, y: 25.5 });
+  game.floor.guards = [guard];
+
+  tick(game, 1);
+  assert.ok(guard.angle > Math.PI && guard.angle - angle < 0.11);
+  tick(game, 1);
+  assert.ok(Math.abs(Math.sin(guard.angle) - Math.sin(guard.targetAngle)) < 1e-8);
 });
 
 test('stairs activate across the full hallway and leave the pursuing guard upstairs', () => {
@@ -275,14 +324,27 @@ test('stairs activate across the full hallway and leave the pursuing guard upsta
   assert.notEqual(game.floor.guards[0], previousFloor.guards[0]);
 });
 
+test('a floor chooses the other corridor end when the first end has no suitable starting room', () => {
+  const game = core.createGame(63);
+  Object.assign(game.player, core.tileCenter(game.floor.goalTile));
+  tick(game, 1);
+
+  const { floor } = game;
+  assert.equal(floor.number, 4);
+  assert.equal(floor.kind, 'loop');
+  const { distance } = core.walkableTiles(floor.tiles, floor.spawnTile);
+  assert.ok(distance[floor.goalTile] >= 26);
+  assert.ok(floor.rooms.some(room => room.tile === floor.spawnTile && !room.lounge));
+});
+
 test('waiting for patrols and taking side passages can clear all five floors unseen', () => {
   // One seed with a keyboard route of up, down, left, right and wait, one tile per symbol.
   const routes = [
-    '.RRUUUURRRRRRRRRRRRRUUUUUUUUUURRRRRRRRRRRRRRR',
-    '......UU...DLDDDDDLLLLDLLLLLLLLLLLLLLLLDLLDDDDDDDDDDDLLLLLLLL',
-    '..............UUUUULLLLLLLLUUULUUUULLLLLLLLLLLLLLDD..LDDDLLLLLLLLL',
-    '.......LLUUUUULLLLLLLLLLLLLUUUUUUUUUUUUU.LLLLLLULLLLLL',
-    '........L.....RDDDDLLDDDL.D..........RDDRR..DLLDDDDRRRRRRRRRRRRRRRRRRRRRRRRRR',
+    '......LDDDDLLLLLLLLLLLDLLLLLLLDDDDDDDDLDLLLLLLLLL',
+    '.......LL.....RRRUUUURRRRRRRRRRRRRUURRRRUUUUUUUUUUUURRRRRRRR',
+    '......UUUUURRRUUUR...U............UUURRRRRRRRRRRRRRRDDDDDRRRRRRRRR',
+    '......RR.............LLLLUUUULLLLLLLLULLLULLDLLLLLLLULUUUUUUUUUUUU.....LLLLLLLLLLL',
+    'UUUULLLLLLLLLLLLLLLLULLULUUUUUUUULLLLLLL',
   ];
   const movements = { U: [0, -1], D: [0, 1], L: [-1, 0], R: [1, 0], '.': [0, 0] };
   const game = core.createGame(0);

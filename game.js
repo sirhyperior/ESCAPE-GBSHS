@@ -2,6 +2,7 @@
   'use strict';
 
   const core = window.DormEscape;
+  const audio = window.DormAudio.create();
   const canvas = document.getElementById('scene');
   const context = canvas.getContext('2d', { alpha: false });
   const hud = document.getElementById('hud');
@@ -18,6 +19,7 @@
   const screenDescription = document.getElementById('screen-description');
   const startControls = document.getElementById('start-controls');
   const startButton = document.getElementById('start');
+  const soundToggle = document.getElementById('sound-toggle');
   const movementKeys = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ShiftLeft', 'ShiftRight']);
   const floorColors = ['#47534a', '#49554b', '#455149'];
   const corridorColors = ['#333e38', '#354039', '#313c37'];
@@ -27,6 +29,7 @@
   };
   const STEP = 1 / 60;
   const FULL_TURN = 2 * Math.PI;
+  const GUARD_CUE_LIGHT = { range: 8, halfAngle: Math.PI };
   const EFFECT_MS = { floor: 1150, escaped: 820, caught: 680 };
 
   let game = core.createGame(17029);
@@ -40,6 +43,7 @@
   let accumulator = 0;
   let dirty = true;
   let sprintReleased = false;
+  let soundEnabled = true;
   const keys = new Set();
 
   function resize() {
@@ -56,6 +60,10 @@
     sprintReleased = false;
     accumulator = 0;
     previousFrame = 0;
+  }
+
+  function applySoundPreference() {
+    audio.setEnabled(soundEnabled && !document.hidden);
   }
 
   function sprintHeld() {
@@ -85,6 +93,10 @@
     dirty = true;
     updateHud();
     beginTransition('floor', performance.now());
+    const initialFloor = game.floor;
+    audio.unlock().then(ready => {
+      if (ready && game.floor === initialFloor && transition?.kind === 'floor') audio.play('floor');
+    });
   }
 
   function beginTransition(kind, time) {
@@ -132,7 +144,10 @@
     const chased = game.floor.guards.some(guard => guard.mode === 'chase');
     if (chased) status = '발각됨 · 추격 중';
     else if (game.floor.guards.some(guard => guard.mode === 'search')) status = '발각됨 · 수색 중';
+    const warning = !status && game.floor.guards.some(guard => guard.noticeTime > 0);
+    if (warning) status = '발각 직전';
     hud.toggleAttribute('data-chase', chased);
+    alert.toggleAttribute('data-warning', warning);
     if (alert.textContent !== status) alert.textContent = status;
     alert.hidden = status === '';
   }
@@ -170,13 +185,17 @@
     }
 
     const path = new Path2D();
-    path.moveTo(actor.x, actor.y);
-    for (const relative of angles.sort((first, second) => first - second)) {
+    const fullCircle = light.halfAngle === Math.PI;
+    if (!fullCircle) path.moveTo(actor.x, actor.y);
+    for (const [index, relative] of angles.sort((first, second) => first - second).entries()) {
       const angle = actor.angle + relative;
       const dx = Math.cos(angle);
       const dy = Math.sin(angle);
       const distance = core.castRay(tiles, actor.x, actor.y, dx, dy, range);
-      path.lineTo(actor.x + dx * distance, actor.y + dy * distance);
+      const x = actor.x + dx * distance;
+      const y = actor.y + dy * distance;
+      if (fullCircle && index === 0) path.moveTo(x, y);
+      else path.lineTo(x, y);
     }
     path.closePath();
     return path;
@@ -393,8 +412,8 @@
     context.restore();
   }
 
-  function drawGuardLamp(floor, guard, light) {
-    const beam = beamPath(floor.tiles, guard, light);
+  function createGuardLamp(tiles, guard, light) {
+    const beam = beamPath(tiles, guard, light);
     const glow = context.createRadialGradient(guard.x, guard.y, 0, guard.x, guard.y, light.range);
     if (guard.mode === 'patrol') {
       glow.addColorStop(0, '#f5bf5f9c');
@@ -403,8 +422,97 @@
       glow.addColorStop(0, '#f77e5ab3');
       glow.addColorStop(1, '#f77e5a36');
     }
-    context.fillStyle = glow;
-    context.fill(beam);
+    return { guard, beam, glow };
+  }
+
+  function drawGuardLamps(lamps) {
+    for (const { beam, glow } of lamps) {
+      context.fillStyle = glow;
+      context.fill(beam);
+    }
+  }
+
+  function drawGuardCues(tiles, player, lamps) {
+    const observer = { x: player.x, y: player.y, angle: 0 };
+    const sight = beamPath(tiles, observer, GUARD_CUE_LIGHT);
+    context.save();
+    context.clip(sight);
+    context.globalAlpha = 0.32;
+    drawGuardLamps(lamps);
+
+    context.globalAlpha = 0.82;
+    context.fillStyle = '#ffdda1';
+    for (const { guard } of lamps) {
+      if (guard.mode !== 'patrol') continue;
+      const source = {
+        x: guard.x + Math.cos(guard.angle) * core.GUARD_RADIUS,
+        y: guard.y + Math.sin(guard.angle) * core.GUARD_RADIUS,
+      };
+      if (!core.seesTarget(tiles, observer, source, GUARD_CUE_LIGHT)) continue;
+      context.beginPath();
+      context.arc(source.x, source.y, 0.067, 0, FULL_TURN);
+      context.fill();
+    }
+
+    context.globalAlpha = 1;
+    const range = GUARD_CUE_LIGHT.range;
+    const fade = context.createRadialGradient(player.x, player.y, range - 1, player.x, player.y, range);
+    fade.addColorStop(0, '#080d0d00');
+    fade.addColorStop(1, '#080d0d');
+    context.fillStyle = fade;
+    context.fill(sight);
+    context.restore();
+  }
+
+  function drawGuardPointer(x, y, direction, color) {
+    context.save();
+    context.translate(x, y);
+    context.rotate(direction);
+    context.beginPath();
+    context.moveTo(11, 0);
+    context.lineTo(-7, -7);
+    context.lineTo(-7, 7);
+    context.closePath();
+    context.fillStyle = color;
+    context.strokeStyle = '#131311';
+    context.lineWidth = 3;
+    context.stroke();
+    context.fill();
+    context.restore();
+  }
+
+  function drawTrackedGuards(guards, player, scale) {
+    const halfWidth = width / 2;
+    const halfHeight = height / 2;
+    for (const guard of guards) {
+      if (guard.mode === 'patrol') continue;
+      const dx = (guard.x - player.x) * scale;
+      const dy = (guard.y - player.y) * scale;
+      const chasing = guard.mode === 'chase';
+      const color = chasing ? '#ffae95' : '#edcb91';
+      if (Math.abs(dx) > halfWidth - 18 || Math.abs(dy) > halfHeight - 18) {
+        const edgeX = Math.max(1, halfWidth - 26);
+        const edgeY = Math.max(1, halfHeight - Math.min(92, height * 0.21));
+        const edge = Math.min(edgeX / Math.abs(dx), edgeY / Math.abs(dy));
+        drawGuardPointer(halfWidth + dx * edge, halfHeight + dy * edge, Math.atan2(dy, dx), color);
+        continue;
+      }
+
+      context.save();
+      context.translate(halfWidth + dx, halfHeight + dy);
+      context.scale(scale, scale);
+      drawActor({x: 0, y: 0, angle: guard.angle}, core.GUARD_RADIUS, '#664440', color, '#ffcb8a');
+      context.beginPath();
+      context.arc(0, 0, core.GUARD_RADIUS + 0.16, 0, FULL_TURN);
+      context.strokeStyle = '#111615';
+      context.lineWidth = 0.105;
+      context.stroke();
+      context.strokeStyle = color;
+      context.lineWidth = 0.045;
+      if (!chasing) context.setLineDash([0.08, 0.055]);
+      context.stroke();
+      context.restore();
+    }
   }
 
   function drawScene() {
@@ -427,6 +535,15 @@
       context.globalAlpha = 1;
     }
 
+    const cueRange = intro ? core.PLAYER_LIGHT.range : GUARD_CUE_LIGHT.range;
+    const lamps = [];
+    for (const guard of floor.guards) {
+      const light = core.guardLight(guard);
+      if (Math.hypot(guard.x - player.x, guard.y - player.y) > cueRange + light.range) continue;
+      lamps.push(createGuardLamp(floor.tiles, guard, light));
+    }
+    if (!intro && lamps.length > 0) drawGuardCues(floor.tiles, player, lamps);
+
     const playerBeam = beamPath(floor.tiles, player, core.PLAYER_LIGHT);
     context.save();
     context.clip(playerBeam);
@@ -441,17 +558,15 @@
     context.fill(playerBeam);
     drawGoal(floor);
 
-    const nearbyGuards = floor.guards.filter(guard => (
-      Math.hypot(guard.x - player.x, guard.y - player.y) <= core.PLAYER_LIGHT.range + core.guardLight(guard).range
-    ));
-    for (const guard of nearbyGuards) drawGuardLamp(floor, guard, core.guardLight(guard));
-    for (const guard of nearbyGuards) {
-      drawActor(guard, core.GUARD_RADIUS, '#664440', '#e39883', '#ffcb8a');
+    drawGuardLamps(lamps);
+    for (const { guard } of lamps) {
+      if (guard.mode === 'patrol') drawActor(guard, core.GUARD_RADIUS, '#664440', '#e39883', '#ffcb8a');
     }
     context.restore();
 
     drawActor(player, core.PLAYER_RADIUS, '#a6c3ac', '#d0e4c8', '#fff0b7');
     context.restore();
+    if (!intro) drawTrackedGuards(floor.guards, player, scale);
   }
 
   function advance(time) {
@@ -469,17 +584,22 @@
 
     accumulator += elapsed;
     while (accumulator >= STEP) {
-      const floor = game.floor;
+      const { floor, player } = game;
+      const { x, y, stamina: previousStamina } = player;
       core.step(game, input(), STEP);
       accumulator -= STEP;
-      if (game.phase !== 'playing') {
-        beginTransition(game.phase, time);
+      if (game.phase !== 'playing' || game.floor !== floor) {
+        const kind = game.phase === 'playing' ? 'floor' : game.phase;
+        beginTransition(kind, time);
+        audio.play(kind);
         break;
       }
-      if (game.floor !== floor) {
-        beginTransition('floor', time);
-        break;
-      }
+      audio.update({
+        speed: Math.hypot(player.x - x, player.y - y) / STEP,
+        sprinting: player.stamina < previousStamina,
+        exhausted: player.exhausted,
+        alerted: floor.guards.some(guard => guard.mode !== 'patrol'),
+      }, STEP);
     }
   }
 
@@ -498,7 +618,7 @@
 
   window.addEventListener('keydown', event => {
     if (view !== 'playing') {
-      if (event.key === 'Enter' && !event.repeat && document.activeElement !== startButton) startGame();
+      if (event.key === 'Enter' && !event.repeat && document.activeElement !== startButton && document.activeElement !== soundToggle) startGame();
       return;
     }
     if (!movementKeys.has(event.code)) return;
@@ -511,9 +631,18 @@
     if ((event.code === 'ShiftLeft' || event.code === 'ShiftRight') && !sprintHeld()) sprintReleased = true;
   });
   window.addEventListener('blur', clearKeys);
-  document.addEventListener('visibilitychange', clearKeys);
+  document.addEventListener('visibilitychange', () => {
+    clearKeys();
+    applySoundPreference();
+  });
   window.addEventListener('resize', resize);
   startButton.addEventListener('click', startGame);
+  soundToggle.addEventListener('click', () => {
+    soundEnabled = !soundEnabled;
+    soundToggle.setAttribute('aria-pressed', String(soundEnabled));
+    soundToggle.textContent = soundEnabled ? '소리 켜짐' : '소리 꺼짐';
+    applySoundPreference();
+  });
   resize();
   requestAnimationFrame(frame);
 })();

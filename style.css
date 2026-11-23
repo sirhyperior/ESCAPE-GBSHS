@@ -142,6 +142,12 @@ body {
   white-space: nowrap;
 }
 
+.alert[data-warning] {
+  border-color: #896c3d;
+  background: #302718;
+  color: #f5d28e;
+}
+
 .play-controls, .start-controls {
   display: flex;
   flex-wrap: wrap;
@@ -297,6 +303,23 @@ button {
 
 button:hover { background: #f2dda2; }
 button:focus-visible { outline: 2px solid var(--paper); outline-offset: 5px; }
+
+.sound-toggle {
+  position: absolute;
+  right: clamp(16px, 3vw, 44px);
+  bottom: clamp(16px, 3vw, 44px);
+  min-height: 36px;
+  margin: 0;
+  padding: 0 12px;
+  border-color: var(--line);
+  background: #131b19;
+  color: var(--paper);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.sound-toggle[aria-pressed='false'] { color: var(--muted); }
+.sound-toggle:hover { background: #252f28; }
 
 @media (max-width: 560px) {
   .screen { background: linear-gradient(90deg, #080d0dfc 0%, #080d0ddd 57%, #080d0d80); }

@@ -8,7 +8,8 @@
   const TILE_STEPS = [-WIDTH, 1, WIDTH, -1];
   const LAYOUTS = ['straight', 'dogleg', 'loop'];
   const LOUNGE_CHANCE = 0.35;
-  const ROOM_SIZES = [[6, 5], [5, 6], [7, 5], [5, 5], [6, 6], [7, 6], [6, 7]];
+  const BEDROOM_SIZES = [[5, 4], [4, 5], [5, 5], [6, 4], [4, 6]];
+  const LOUNGE_SIZES = [[6, 5], [5, 6], [6, 6], [7, 6], [6, 7]];
   const PERSONAL_BELONGINGS = ['suitcase', 'duffel', 'plant', 'books', 'shoes', 'desk'];
   const FABRICS = ['#647d82', '#83665d', '#6a7c64', '#82765a', '#6b657f', '#8b795f'];
   const LONG_FURNITURE = new Set(['bunk', 'desk', 'sofa', 'table', 'rug']);
@@ -162,9 +163,11 @@
   function createRooms(tiles, roomsByTile, doorways, random) {
     const rooms = [];
     const count = choose([7, 8, 8, 9, 10], random);
+    const hasLounge = random() < LOUNGE_CHANCE;
     for (const entry of roomEntrances(tiles, random)) {
       const { x, y, outX, outY, hall, wall } = entry;
-      const sizes = shuffle(ROOM_SIZES.slice(), random);
+      const lounge = hasLounge && rooms.length === 0;
+      const sizes = shuffle((lounge ? LOUNGE_SIZES : BEDROOM_SIZES).slice(), random);
       for (const [width, height] of sizes) {
         const shiftX = choose([1, width - 3], random);
         const shiftY = choose([1, height - 3], random);
@@ -175,7 +178,7 @@
         const id = rooms.length;
         const tile = tileAt(left + Math.floor(width / 2), top + Math.floor(height / 2));
         const inside = wall.map(part => part + outX + outY * WIDTH);
-        rooms.push({ id, tile, left, top, width, height, entrance: { hall, wall, inside }, lounge: false });
+        rooms.push({ id, tile, left, top, width, height, entrance: { hall, wall, inside }, lounge });
         for (let row = top; row < top + height; row += 1) {
           for (let column = left; column < left + width; column += 1) {
             const space = tileAt(column, row);
@@ -266,11 +269,6 @@
     ]));
     const routes = centerlines.map((points, index) => carveCorridor(tiles, points, index === 0 ? 3 : 2));
     const rooms = createRooms(tiles, roomsByTile, doorways, random);
-
-    if (random() < LOUNGE_CHANCE) {
-      const largest = rooms.reduce((best, room) => room.width * room.height > best.width * best.height ? room : best);
-      largest.lounge = true;
-    }
     const sorted = rooms.slice().sort((a, b) => a.top - b.top || a.left - b.left);
     sorted.forEach((room, index) => { room.number = index + 1; });
     const furniture = rooms.flatMap(room => furnishRoom(tiles, roomsByTile, room, random));
