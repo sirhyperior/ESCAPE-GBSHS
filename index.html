@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#080d0d">
+    <title>기숙사 탈출하기</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="game-map.js" defer></script>
+    <script src="game-core.js" defer></script>
+    <script src="game.js" defer></script>
+  </head>
+  <body>
+    <main class="game" aria-label="기숙사 탈출하기">
+      <canvas id="scene" aria-hidden="true"></canvas>
+
+      <div class="hud" id="hud" hidden>
+        <div class="floor-panel">
+          <div class="floor-number"><span id="floor">5</span><span class="floor-unit">층</span></div>
+          <span class="objective" id="objective">아래층 계단 찾기</span>
+        </div>
+
+        <div class="stamina-panel">
+          <div class="stamina-heading">
+            <label for="stamina">스태미나</label>
+            <span class="stamina-percent" id="stamina-percent" aria-hidden="true">100%</span>
+          </div>
+          <meter id="stamina" min="0" max="3" value="3">100%</meter>
+          <span class="fatigue" id="fatigue" role="status" hidden></span>
+        </div>
+
+        <div class="alert" id="alert" role="status" hidden></div>
+
+        <div class="play-controls" aria-label="조작법">
+          <span><kbd aria-label="화살표 키">↑ ↓ ← →</kbd> 이동</span>
+          <span><kbd>Shift</kbd> 달리기</span>
+        </div>
+      </div>
+
+      <div class="scene-transition" id="scene-transition" hidden>
+        <div class="floor-announcement" id="floor-announcement" role="status"></div>
+      </div>
+
+      <section class="screen" id="screen" aria-labelledby="screen-title" data-screen="start">
+        <div class="screen-content">
+          <div class="screen-mark" aria-hidden="true"></div>
+          <h1 id="screen-title">기숙사<br>탈출하기</h1>
+          <p id="screen-description">사감을 피해 5층에서 1층 출구까지 내려가세요.</p>
+          <div class="start-controls" id="start-controls" aria-label="조작법">
+            <span><kbd aria-label="화살표 키">↑ ↓ ← →</kbd> 이동</span>
+            <span><kbd>Shift</kbd> 달리기</span>
+          </div>
+          <button id="start" type="button">탈출 시작</button>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
