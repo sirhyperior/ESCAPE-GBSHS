@@ -3,7 +3,7 @@
 
   const map = typeof module === 'object' && module.exports ? require('./game-map.js') : root.DormMap;
   const {
-    WIDTH, HEIGHT, LAYOUTS, randomSource, choose, shuffle, tileAt, tileCenter,
+    WIDTH, HEIGHT, WALL, LAYOUTS, randomSource, choose, shuffle, tileAt, tileCenter,
     isWall, isSolid, walkableTiles, createLayout,
   } = map;
   const MIN_ROUTE = 26;
@@ -16,10 +16,12 @@
   const RUN_SPEED = 5;
   const PATROL_SPEED = 2.35;
   const CHASE_SPEED = 3.7;
-  const PATROL_TURN_SPEED = 6.2;
-  const CHASE_TURN_SPEED = 9.4;
+  const PATROL_TURN_SPEED = 4.2;
+  const CHASE_TURN_SPEED = 6.5;
+  const PATROL_SPACING = 2.5;
+  const PURSUIT_SPACING = 0.8;
   const NOTICE_TIME = 0.75;
-  const MAX_STAMINA = 3;
+  const MAX_STAMINA = 4;
   const RECOVERY_DELAY = 0.75;
   const RECOVERY_RATE = MAX_STAMINA / 4;
   const EXHAUSTED_RECOVERY_RATE = MAX_STAMINA / 7;
@@ -47,12 +49,12 @@
 
   function createFloor(number, seed, kind) {
     const random = randomSource(seed);
-    const layout = createLayout(random, kind);
-    const { tiles, rooms, routes } = layout;
+    const layout = createLayout(random, kind, 5 - number);
+    const { tiles, rooms, routes, width } = layout;
     const [main, bypass] = routes;
     const bedrooms = rooms.filter(room => !room.lounge);
     const ends = [main[0], main.at(-1)].map(tile => {
-      const { distance } = walkableTiles(tiles, tile);
+      const { distance } = walkableTiles(tiles, tile, -1, width);
       const farthest = Math.max(...bedrooms.map(room => distance[room.tile]));
       return { tile, distance, farthest };
     });
@@ -66,11 +68,11 @@
     starts.sort((a, b) => entry.distance[a.tile] - entry.distance[b.tile]);
     const spawnTile = choose(starts.slice(0, 2), random).tile;
     const goalTile = goal.tile;
-    const goalTiles = [goalTile - WIDTH, goalTile, goalTile + WIDTH];
+    const goalTiles = [goalTile - width, goalTile, goalTile + width];
     const lookouts = doorwayLookouts(rooms, routes);
     const floor = { ...layout, number, spawnTile, goalTile, goalTiles, lookouts, random, guards: [] };
 
-    const distance = walkableTiles(tiles, spawnTile).distance;
+    const distance = walkableTiles(tiles, spawnTile, -1, width).distance;
     const count = GUARD_COUNTS[number];
     // Floor 5 leaves the entry half of the main corridor open for learning the controls.
     const middle = Math.floor(main.length / 2);
@@ -78,9 +80,9 @@
     const patrolStart = number === 5 && entranceAtStart ? middle : 3;
     const patrolEnd = number === 5 && !entranceAtStart ? middle : main.length - 3;
     const hallway = main.slice(patrolStart, patrolEnd);
-    const exit = tileCenter(goalTile);
+    const exit = tileCenter(goalTile, width);
     const safe = tile => {
-      const point = tileCenter(tile);
+      const point = tileCenter(tile, width);
       return distance[tile] >= MIN_GUARD_DISTANCE && Math.hypot(point.x - exit.x, point.y - exit.y) >= 4;
     };
     const hallSpawns = hallway.filter(safe);
@@ -93,7 +95,7 @@
       if (index === 0) candidates.sort((a, b) => distance[a] - distance[b]);
       else {
         const separation = tile => {
-          const point = tileCenter(tile);
+          const point = tileCenter(tile, width);
           return Math.min(...floor.guards.map(guard => Math.hypot(guard.x - point.x, guard.y - point.y)));
         };
         candidates.sort((a, b) => separation(b) - separation(a));
@@ -106,7 +108,7 @@
       const first = Math.max(0, startIndex - reach);
       const patrolRoute = route.slice(first, startIndex + reach + 1);
       const guard = {
-        ...tileCenter(tile),
+        ...tileCenter(tile, width),
         angle: 0,
         targetAngle: 0,
         mode: 'patrol',
@@ -122,7 +124,7 @@
         unseenTime: 0,
         noticeTime: 0,
       };
-      choosePatrolPath(guard);
+      choosePatrolPath(guard, width);
       const next = guard.path[guard.pathIndex];
       guard.angle = guard.targetAngle = Math.atan2(next.y - guard.y, next.x - guard.x);
       floor.guards.push(guard);
@@ -133,9 +135,9 @@
   function enterFloor(game, number) {
     const kind = game.layoutOrder[(5 - number) % game.layoutOrder.length];
     const floor = createFloor(number, Math.floor(game.random() * 4294967296), kind);
-    const spawn = tileCenter(floor.spawnTile);
-    const routeFromGoal = walkableTiles(floor.tiles, floor.goalTile, floor.spawnTile);
-    const firstStep = tileCenter(routeFromGoal.previous[floor.spawnTile]);
+    const spawn = tileCenter(floor.spawnTile, floor.width);
+    const routeFromGoal = walkableTiles(floor.tiles, floor.goalTile, floor.spawnTile, floor.width);
+    const firstStep = tileCenter(routeFromGoal.previous[floor.spawnTile], floor.width);
     Object.assign(game.player, spawn, { angle: Math.atan2(firstStep.y - spawn.y, firstStep.x - spawn.x) });
     game.floor = floor;
   }
@@ -153,7 +155,7 @@
     return game;
   }
 
-  function castRay(tiles, x, y, dx, dy, limit, blocked = isWall) {
+  function castRay(tiles, x, y, dx, dy, limit, blocked = isWall, width = WIDTH) {
     let tileX = Math.floor(x);
     let tileY = Math.floor(y);
     const stepX = Math.sign(dx);
@@ -166,7 +168,7 @@
     while (Math.min(crossX, crossY) <= limit) {
       const distance = Math.min(crossX, crossY);
       if (Math.abs(crossX - crossY) < EPSILON) {
-        if (blocked(tiles, tileX + stepX, tileY) || blocked(tiles, tileX, tileY + stepY)) return distance;
+        if (blocked(tiles, tileX + stepX, tileY, width) || blocked(tiles, tileX, tileY + stepY, width)) return distance;
         tileX += stepX;
         tileY += stepY;
         crossX += deltaX;
@@ -178,7 +180,7 @@
         tileY += stepY;
         crossY += deltaY;
       }
-      if (blocked(tiles, tileX, tileY)) return distance;
+      if (blocked(tiles, tileX, tileY, width)) return distance;
     }
     return limit;
   }
@@ -187,7 +189,7 @@
     return guard.mode === 'patrol' ? PATROL_LIGHT : CHASE_LIGHT;
   }
 
-  function seesTarget(tiles, actor, target, light) {
+  function seesTarget(tiles, actor, target, light, width = WIDTH) {
     const x = target.x - actor.x;
     const y = target.y - actor.y;
     const distance = Math.hypot(x, y);
@@ -197,13 +199,13 @@
     const dy = y / distance;
     const facing = dx * Math.cos(actor.angle) + dy * Math.sin(actor.angle);
     return facing >= Math.cos(light.halfAngle) - EPSILON &&
-      castRay(tiles, actor.x, actor.y, dx, dy, distance) >= distance - EPSILON;
+      castRay(tiles, actor.x, actor.y, dx, dy, distance, isWall, width) >= distance - EPSILON;
   }
 
-  function canStand(tiles, x, y, radius) {
+  function canStand({tiles, width}, x, y, radius) {
     for (let row = Math.floor(y - radius); row <= Math.floor(y + radius); row += 1) {
       for (let column = Math.floor(x - radius); column <= Math.floor(x + radius); column += 1) {
-        if (!isSolid(tiles, column, row)) continue;
+        if (!isSolid(tiles, column, row, width)) continue;
         const dx = x - Math.max(column, Math.min(column + 1, x));
         const dy = y - Math.max(row, Math.min(row + 1, y));
         if (dx * dx + dy * dy < radius * radius) return false;
@@ -227,8 +229,8 @@
     if (magnitude > 0) {
       const x = startX + travel * input.x / magnitude;
       const y = startY + travel * input.y / magnitude;
-      if (canStand(floor.tiles, x, startY, PLAYER_RADIUS)) player.x = x;
-      if (canStand(floor.tiles, player.x, y, PLAYER_RADIUS)) player.y = y;
+      if (canStand(floor, x, startY, PLAYER_RADIUS)) player.x = x;
+      if (canStand(floor, player.x, y, PLAYER_RADIUS)) player.y = y;
     }
 
     const moved = Math.hypot(player.x - startX, player.y - startY) > EPSILON;
@@ -254,60 +256,106 @@
     }
   }
 
-  function moveToward(guard, target, travel) {
+  function canApproach(floor, guard, x, y) {
+    const regularPatrol = guard.mode === 'patrol' && guard.pathTarget === -1;
+    const spacing = regularPatrol ? PATROL_SPACING : PURSUIT_SPACING;
+    for (const other of floor.guards) {
+      if (other === guard) continue;
+      const after = (other.x - x) ** 2 + (other.y - y) ** 2;
+      if (after >= spacing * spacing) continue;
+      const before = (other.x - guard.x) ** 2 + (other.y - guard.y) ** 2;
+      if (after < before - EPSILON) return false;
+    }
+    return true;
+  }
+
+  function moveToward(floor, guard, target, travel) {
     const dx = target.x - guard.x;
     const dy = target.y - guard.y;
     const distance = Math.hypot(dx, dy);
     if (distance < EPSILON) return travel;
 
     guard.targetAngle = Math.atan2(dy, dx);
-    if (distance <= travel) {
-      Object.assign(guard, target);
-      return travel - distance;
-    }
-    guard.x += dx * travel / distance;
-    guard.y += dy * travel / distance;
-    return 0;
+    const fraction = Math.min(1, travel / distance);
+    const x = distance <= travel ? target.x : guard.x + dx * fraction;
+    const y = distance <= travel ? target.y : guard.y + dy * fraction;
+    if (!canApproach(floor, guard, x, y)) return -1;
+    guard.x = x;
+    guard.y = y;
+    return Math.max(0, travel - distance);
   }
 
-  function setPath(guard, tiles, target) {
-    const start = tileAt(guard.x, guard.y);
-    const { previous } = walkableTiles(tiles, start, target);
+  function setPath(guard, {tiles, width}, target) {
+    const start = tileAt(guard.x, guard.y, width);
+    const { previous } = walkableTiles(tiles, start, target, width);
+    setPathFromSearch(guard, target, previous, width);
+  }
+
+  function setPathFromSearch(guard, target, previous, width) {
     const path = [];
-    for (let tile = target; tile !== -1; tile = previous[tile]) path.push(tileCenter(tile));
+    for (let tile = target; tile !== -1; tile = previous[tile]) path.push(tileCenter(tile, width));
     guard.path = path.reverse();
     guard.pathIndex = 0;
     guard.pathTarget = target;
   }
 
-  function followPath(guard, travel) {
+  function followPath(floor, guard, travel) {
     while (travel > EPSILON && guard.pathIndex < guard.path.length) {
-      travel = moveToward(guard, guard.path[guard.pathIndex], travel);
+      travel = moveToward(floor, guard, guard.path[guard.pathIndex], travel);
       if (travel > EPSILON) guard.pathIndex += 1;
     }
     return travel;
   }
 
   function returnToPatrol(floor, guard) {
-    const start = tileAt(guard.x, guard.y);
-    const { distance } = walkableTiles(floor.tiles, start);
-    const route = guard.patrolRoute;
-    guard.routeIndex = route.reduce((closest, tile, index) => distance[tile] < distance[route[closest]] ? index : closest, 0);
     guard.mode = 'patrol';
     guard.unseenTime = 0;
     guard.lastSeen = null;
     guard.lookTime = 0;
     guard.lookCooldown = 1;
-    setPath(guard, floor.tiles, route[guard.routeIndex]);
+    rejoinPatrol(floor, guard);
   }
 
-  function choosePatrolPath(guard) {
+  function rejoinPatrol({tiles, width, guards}, guard, avoidGuards = false) {
+    const start = tileAt(guard.x, guard.y, width);
+    const open = avoidGuards ? tiles.slice() : tiles;
+    let stepsByDirection;
+    if (avoidGuards) {
+      for (const other of guards) {
+        if (other === guard) continue;
+        const occupied = tileAt(other.x, other.y, width);
+        if (occupied !== start) open[occupied] = WALL;
+      }
+      // Prefer a right-hand detour so guards approaching head-on take different sides.
+      const target = tileCenter(guard.pathTarget, width);
+      const dx = target.x - guard.x;
+      const dy = target.y - guard.y;
+      const horizontal = Math.abs(dx) >= Math.abs(dy);
+      const forward = horizontal ? Math.sign(dx) || 1 : Math.sign(dy) * width;
+      const right = horizontal ? forward * width : -Math.sign(dy);
+      stepsByDirection = [right, forward, -right, -forward];
+    }
+
+    const { distance, previous } = walkableTiles(open, start, -1, width, stepsByDirection);
+    const route = guard.patrolRoute;
+    let closest = Infinity;
+    for (let index = 0; index < route.length; index += 1) {
+      const steps = distance[route[index]];
+      if (steps < 0 || steps >= closest) continue;
+      closest = steps;
+      guard.routeIndex = index;
+    }
+    if (closest < Infinity) setPathFromSearch(guard, route[guard.routeIndex], previous, width);
+  }
+
+  function choosePatrolPath(guard, width) {
     const route = guard.patrolRoute;
     const next = guard.routeIndex + guard.direction;
     if (next < 0 || next >= route.length) guard.direction *= -1;
     guard.routeIndex += guard.direction;
-    guard.path = [tileCenter(route[guard.routeIndex])];
+    guard.path = [tileCenter(route[guard.routeIndex], width)];
     guard.pathIndex = 0;
+    guard.pathTarget = -1;
   }
 
   function patrol(floor, guard, dt) {
@@ -317,27 +365,36 @@
       return;
     }
 
-    let travel = followPath(guard, PATROL_SPEED * dt);
+    let travel = followPath(floor, guard, PATROL_SPEED * dt);
     while (travel > EPSILON) {
       const places = floor.lookouts.get(guard.patrolRoute[guard.routeIndex]);
       if (places && guard.lookCooldown === 0 && floor.random() < 0.58) {
-        const point = tileCenter(choose(places, floor.random));
+        const point = tileCenter(choose(places, floor.random), floor.width);
         guard.targetAngle = Math.atan2(point.y - guard.y, point.x - guard.x);
         guard.lookTime = 0.65;
         guard.lookCooldown = 3 + floor.random() * 2;
         return;
       }
-      choosePatrolPath(guard);
-      travel = followPath(guard, travel);
+      choosePatrolPath(guard, floor.width);
+      travel = followPath(floor, guard, travel);
+    }
+    if (travel < 0) {
+      if (guard.pathTarget === -1) {
+        guard.direction *= -1;
+        choosePatrolPath(guard, floor.width);
+      } else {
+        rejoinPatrol(floor, guard, true);
+        guard.lookTime = 0.2;
+      }
     }
   }
 
-  function clearPath(tiles, guard, target, distance) {
+  function clearPath({tiles, width}, guard, target, distance) {
     const dx = (target.x - guard.x) / distance;
     const dy = (target.y - guard.y) / distance;
     const limit = distance - EPSILON;
     return [0, -GUARD_RADIUS, GUARD_RADIUS].every(offset => (
-      castRay(tiles, guard.x - dy * offset, guard.y + dx * offset, dx, dy, limit, isSolid) >= limit
+      castRay(tiles, guard.x - dy * offset, guard.y + dx * offset, dx, dy, limit, isSolid, width) >= limit
     ));
   }
 
@@ -347,16 +404,16 @@
     if (distance < EPSILON) return;
 
     const travel = CHASE_SPEED * dt;
-    if (clearPath(floor.tiles, guard, target, distance)) {
+    if (clearPath(floor, guard, target, distance)) {
       guard.pathTarget = -1;
-      moveToward(guard, target, travel);
+      moveToward(floor, guard, target, travel);
       return;
     }
 
-    const targetTile = tileAt(target.x, target.y);
-    if (targetTile !== guard.pathTarget) setPath(guard, floor.tiles, targetTile);
-    const remaining = followPath(guard, travel);
-    if (remaining > EPSILON) moveToward(guard, target, remaining);
+    const targetTile = tileAt(target.x, target.y, floor.width);
+    if (targetTile !== guard.pathTarget) setPath(guard, floor, targetTile);
+    const remaining = followPath(floor, guard, travel);
+    if (remaining > EPSILON) moveToward(floor, guard, target, remaining);
   }
 
   function turnGuard(guard, dt) {
@@ -367,7 +424,7 @@
   }
 
   function updateGuard(floor, guard, player, dt) {
-    const visible = seesTarget(floor.tiles, guard, player, guardLight(guard));
+    const visible = seesTarget(floor.tiles, guard, player, guardLight(guard), floor.width);
     if (guard.mode === 'patrol') {
       guard.noticeTime = visible ? guard.noticeTime + dt : 0;
       if (visible && guard.noticeTime < NOTICE_TIME - EPSILON) {
@@ -399,7 +456,7 @@
     updatePlayer(game, input, dt);
     const { player, floor } = game;
 
-    if (floor.goalTiles.includes(tileAt(player.x, player.y))) {
+    if (floor.goalTiles.includes(tileAt(player.x, player.y, floor.width))) {
       if (floor.number === 1) game.phase = 'escaped';
       else enterFloor(game, floor.number - 1);
       return;

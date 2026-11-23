@@ -36,13 +36,13 @@ function followExitRoute(game) {
     if (game.floor !== floor) {
       floor = game.floor;
       floors.push(floor.number);
-      previous = core.walkableTiles(floor.tiles, floor.goalTile).previous;
+      previous = core.walkableTiles(floor.tiles, floor.goalTile, -1, floor.width).previous;
       target = previous[floor.spawnTile];
     }
-    let point = core.tileCenter(target);
+    let point = core.tileCenter(target, floor.width);
     if (Math.abs(player.x - point.x) <= 0.045 && Math.abs(player.y - point.y) <= 0.045) {
       target = previous[target];
-      point = core.tileCenter(target);
+      point = core.tileCenter(target, floor.width);
     }
     const dx = point.x - player.x;
     const dy = point.y - player.y;
@@ -60,22 +60,30 @@ test('1,600 seeded floors have wide, connected corridors and furnished dorm room
   for (let seed = 0; seed < 320; seed += 1) {
     for (let number = 5; number >= 1; number -= 1) {
       const floor = core.createFloor(number, seed);
-      const { distance } = core.walkableTiles(floor.tiles, floor.spawnTile);
+      const { width, height } = floor;
+      const depth = 5 - number;
+      const { distance } = core.walkableTiles(floor.tiles, floor.spawnTile, -1, width);
       kinds.add(floor.kind);
-      assert.equal(floor.tiles.length, 43 * 31);
-      assert.ok(floor.rooms.length >= 6 && floor.rooms.length <= 10);
+      assert.equal(width, 43 + 4 * depth);
+      assert.equal(height, 31 + 2 * depth);
+      assert.equal(floor.tiles.length, width * height);
+      assert.ok(floor.rooms.length >= 6 && floor.rooms.length <= 10 + depth);
       assert.ok(floor.tiles.every((value, tile) => value !== 0 || distance[tile] >= 0));
       assert.ok(distance[floor.goalTile] >= 26);
       assert.ok(floor.goalTiles.every(tile => floor.roomsByTile[tile] === -1 && distance[tile] >= 0));
 
       const [main, bypass] = floor.routes;
+      const ends = [main[0] - Math.sign(main[1] - main[0]), main.at(-1) + Math.sign(main.at(-1) - main.at(-2))];
+      for (const end of ends) {
+        assert.ok(floor.rooms.some(room => room.entrance.hall.some(tile => Math.abs(tile - end) === width)));
+      }
       for (const tile of main) {
-        for (const row of [tile - core.WIDTH, tile, tile + core.WIDTH]) {
+        for (const row of [tile - width, tile, tile + width]) {
           assert.ok([row - 1, row, row + 1].every(space => floor.tiles[space] === 0 && floor.roomsByTile[space] === -1));
         }
       }
       for (const tile of bypass) {
-        assert.ok([tile, tile + 1, tile + core.WIDTH, tile + core.WIDTH + 1].every(space => floor.tiles[space] === 0 && floor.roomsByTile[space] === -1));
+        assert.ok([tile, tile + 1, tile + width, tile + width + 1].every(space => floor.tiles[space] === 0 && floor.roomsByTile[space] === -1));
       }
 
       assert.ok(floor.rooms.filter(room => room.lounge).length <= 1);
@@ -84,7 +92,18 @@ test('1,600 seeded floors have wide, connected corridors and furnished dorm room
         const { hall, wall, inside } = room.entrance;
         assert.equal(wall.length, 2);
         assert.ok([...hall, ...wall, ...inside].every(tile => floor.tiles[tile] === 0));
-        const objects = floor.furniture.filter(object => floor.roomsByTile[core.tileAt(object.x, object.y)] === room.id);
+        assert.equal(floor.roomsByTile[room.hidingTile], room.id);
+        assert.equal(floor.tiles[room.hidingTile], 0);
+        const hiding = core.tileCenter(room.hidingTile, width);
+        const light = { range: 8.25, halfAngle: Math.PI };
+        for (let y = Math.max(0, Math.floor(hiding.y - light.range)); y < Math.min(height, hiding.y + light.range); y += 1) {
+          for (let x = Math.max(0, Math.floor(hiding.x - light.range)); x < Math.min(width, hiding.x + light.range); x += 1) {
+            const tile = core.tileAt(x, y, width);
+            if (floor.tiles[tile] !== 0 || floor.roomsByTile[tile] !== -1 || floor.doorways[tile]) continue;
+            assert.equal(core.seesTarget(floor.tiles, { x: x + 0.5, y: y + 0.5, angle: 0 }, hiding, light, width), false);
+          }
+        }
+        const objects = floor.furniture.filter(object => floor.roomsByTile[core.tileAt(object.x, object.y, width)] === room.id);
         if (room.lounge) {
           lounges += 1;
           assert.ok(area >= 30 && area <= 42);
@@ -101,7 +120,7 @@ test('1,600 seeded floors have wide, connected corridors and furnished dorm room
       assert.equal(floor.guards.length, [0, 4, 3, 3, 2, 1][number]);
       const spawns = new Set();
       for (const guard of floor.guards) {
-        const spawn = core.tileAt(guard.x, guard.y);
+        const spawn = core.tileAt(guard.x, guard.y, width);
         assert.ok(distance[spawn] >= 12);
         assert.equal(floor.roomsByTile[spawn], -1);
         assert.ok(guard.patrolRoute.includes(spawn));
@@ -173,21 +192,23 @@ test('stamina recovers in four seconds when the player stops before exhaustion',
   const game = openFloor();
   Object.assign(game.player, { x: 3.5, y: 11.5 });
   tick(game, 120, { x: 1, y: 0, sprint: true });
-  assert.ok(Math.abs(game.player.stamina - 1) < 1e-8);
+  assert.ok(Math.abs(game.player.stamina - 2) < 1e-8);
   tick(game, 45);
-  assert.ok(Math.abs(game.player.stamina - 1) < 1e-8);
-  tick(game, 159);
-  assert.ok(game.player.stamina < 3);
+  assert.ok(Math.abs(game.player.stamina - 2) < 1e-8);
+  tick(game, 119);
+  assert.ok(game.player.stamina < 4);
   tick(game, 1);
-  assert.equal(game.player.stamina, 3);
+  assert.equal(game.player.stamina, 4);
 });
 
 test('exhaustion slows walking and prevents sprinting until a full seven-second recovery', () => {
   const game = openFloor();
   Object.assign(game.player, { x: 3.5, y: 11.5 });
   const sprint = { x: 1, y: 0, sprint: true };
-  tick(game, 180, sprint);
-  assert.ok(Math.abs(game.player.x - 18.5) < 1e-8);
+  tick(game, 239, sprint);
+  assert.equal(game.player.exhausted, false);
+  tick(game, 1, sprint);
+  assert.ok(Math.abs(game.player.x - 23.5) < 1e-8);
   assert.equal(game.player.stamina, 0);
   assert.equal(game.player.sprintLocked, true);
   assert.equal(game.player.exhausted, true);
@@ -195,22 +216,22 @@ test('exhaustion slows walking and prevents sprinting until a full seven-second 
   tick(game, 45, { ...IDLE, sprint: true });
   assert.ok(game.player.stamina < 1e-8);
   tick(game, 240, { ...IDLE, sprint: true });
-  assert.ok(game.player.stamina < 3);
+  assert.ok(game.player.stamina < 4);
   tick(game, 60, sprint);
-  assert.ok(Math.abs(game.player.x - 20.3) < 1e-8);
+  assert.ok(Math.abs(game.player.x - 25.3) < 1e-8);
   tick(game, 119, { ...IDLE, sprint: true });
   assert.equal(game.player.exhausted, true);
   tick(game, 1, { ...IDLE, sprint: true });
   assert.equal(game.player.exhausted, false);
-  assert.equal(game.player.stamina, 3);
+  assert.equal(game.player.stamina, 4);
   assert.equal(game.player.sprintLocked, true);
   tick(game, 60, sprint);
-  assert.ok(Math.abs(game.player.x - 23.3) < 1e-8);
+  assert.ok(Math.abs(game.player.x - 28.3) < 1e-8);
 
   tick(game, 1);
   tick(game, 60, sprint);
-  assert.ok(Math.abs(game.player.x - 28.3) < 1e-8);
-  assert.ok(Math.abs(game.player.stamina - 2) < 1e-8);
+  assert.ok(Math.abs(game.player.x - 33.3) < 1e-8);
+  assert.ok(Math.abs(game.player.stamina - 3) < 1e-8);
 });
 
 test('breaking sight during the 0.75-second warning resets detection', () => {
@@ -287,7 +308,7 @@ test('a patrolling guard pauses in the hall to turn its light into a doorway', (
   assert.ok(guard.angle > 0 && guard.angle < Math.PI / 2);
   assert.ok(guard.lookTime > 0);
   assert.equal(guard.x, 11.5);
-  tick(game, 16);
+  tick(game, 20);
   assert.ok(Math.abs(guard.angle - Math.PI / 2) < 1e-8);
   assert.equal(guard.x, 11.5);
 });
@@ -304,9 +325,69 @@ test('a guard takes the short arc when its heading crosses the angle boundary', 
   game.floor.guards = [guard];
 
   tick(game, 1);
-  assert.ok(guard.angle > Math.PI && guard.angle - angle < 0.11);
-  tick(game, 1);
+  assert.ok(guard.angle > Math.PI && Math.abs(guard.angle - angle - 0.07) < 1e-8);
+  tick(game, 2);
   assert.ok(Math.abs(Math.sin(guard.angle) - Math.sin(guard.targetAngle)) < 1e-8);
+});
+
+test('guards turn away from each other on a shared patrol route', () => {
+  const game = openFloor();
+  const route = Array.from({length: 13}, (_, index) => core.tileAt(8 + index, 10));
+  const guards = core.createFloor(4, 0).guards;
+  const [first, second] = guards;
+  Object.assign(game.player, { x: 30.5, y: 25.5 });
+  Object.assign(first, { x: 10.5, y: 10.5, angle: 0, direction: 1, routeIndex: 3 });
+  Object.assign(second, { x: 15.5, y: 10.5, angle: Math.PI, direction: -1, routeIndex: 6 });
+  for (const guard of guards) {
+    Object.assign(guard, { patrolRoute: route, path: [core.tileCenter(route[guard.routeIndex])], pathIndex: 0 });
+  }
+  game.floor.guards = guards;
+
+  let nearest = Infinity;
+  for (let frame = 0; frame < 100; frame += 1) {
+    tick(game, 1);
+    nearest = Math.min(nearest, second.x - first.x);
+  }
+  assert.ok(nearest >= 2.5 - 1e-8 && nearest < 2.6);
+  assert.ok(second.x - first.x > 5);
+});
+
+test('pursuing guards keep from overlapping and can still catch the player', () => {
+  const game = openFloor();
+  const [first, second] = core.createFloor(4, 0).guards;
+  const target = { x: 18.5, y: 9.5 };
+  Object.assign(game.player, target);
+  Object.assign(first, { x: 10.5, y: 9.5, angle: 0, mode: 'chase', lastSeen: target });
+  Object.assign(second, { x: 9.5, y: 9.5, angle: 0, mode: 'chase', lastSeen: target });
+  game.floor.guards = [first, second];
+
+  for (let frame = 0; frame < 150 && game.phase === 'playing'; frame += 1) {
+    tick(game, 1);
+    assert.ok(first.x - second.x >= 0.8 - 1e-8);
+  }
+  assert.equal(game.phase, 'caught');
+  assert.ok(second.x > 16);
+});
+
+test('guards returning to patrol take different sides of the hallway', () => {
+  const game = openFloor();
+  game.floor.tiles.fill(1);
+  for (let y = 9; y <= 11; y += 1) {
+    for (let x = 3; x <= 31; x += 1) game.floor.tiles[core.tileAt(x, y)] = 0;
+  }
+  Object.assign(game.player, { x: 30.5, y: 22.5 });
+  const [first, second] = core.createFloor(4, 0).guards;
+  const eastRoute = [16, 17, 18, 19, 20].map(x => core.tileAt(x, 10));
+  const westRoute = [7, 8, 9, 10, 11].map(x => core.tileAt(x, 10));
+  const searching = { y: 10.5, mode: 'search', unseenTime: 2.49 };
+  Object.assign(first, searching, { x: 10.5, angle: 0, patrolRoute: eastRoute });
+  Object.assign(second, searching, { x: 15.5, angle: Math.PI, patrolRoute: westRoute });
+  game.floor.guards = [first, second];
+
+  tick(game, 240);
+  assert.ok(eastRoute.includes(core.tileAt(first.x, first.y)));
+  assert.ok(westRoute.includes(core.tileAt(second.x, second.y)));
+  assert.ok(game.floor.guards.every(guard => guard.mode === 'patrol' && guard.pathTarget === -1));
 });
 
 test('stairs activate across the full hallway and leave the pursuing guard upstairs', () => {
@@ -324,7 +405,7 @@ test('stairs activate across the full hallway and leave the pursuing guard upsta
   assert.notEqual(game.floor.guards[0], previousFloor.guards[0]);
 });
 
-test('a floor chooses the other corridor end when the first end has no suitable starting room', () => {
+test('a wider loop floor still starts in a bedroom far from the stairs', () => {
   const game = core.createGame(63);
   Object.assign(game.player, core.tileCenter(game.floor.goalTile));
   tick(game, 1);
@@ -332,7 +413,7 @@ test('a floor chooses the other corridor end when the first end has no suitable 
   const { floor } = game;
   assert.equal(floor.number, 4);
   assert.equal(floor.kind, 'loop');
-  const { distance } = core.walkableTiles(floor.tiles, floor.spawnTile);
+  const { distance } = core.walkableTiles(floor.tiles, floor.spawnTile, -1, floor.width);
   assert.ok(distance[floor.goalTile] >= 26);
   assert.ok(floor.rooms.some(room => room.tile === floor.spawnTile && !room.lounge));
 });
@@ -340,11 +421,11 @@ test('a floor chooses the other corridor end when the first end has no suitable 
 test('waiting for patrols and taking side passages can clear all five floors unseen', () => {
   // One seed with a keyboard route of up, down, left, right and wait, one tile per symbol.
   const routes = [
-    '......LDDDDLLLLLLLLLLLDLLLLLLLDDDDDDDDLDLLLLLLLLL',
-    '.......LL.....RRRUUUURRRRRRRRRRRRRUURRRRUUUUUUUUUUUURRRRRRRR',
-    '......UUUUURRRUUUR...U............UUURRRRRRRRRRRRRRRDDDDDRRRRRRRRR',
-    '......RR.............LLLLUUUULLLLLLLLULLLULLDLLLLLLLULUUUUUUUUUUUU.....LLLLLLLLLLL',
-    'UUUULLLLLLLLLLLLLLLLULLULUUUUUUUULLLLLLL',
+    'UUULUUUURRRRRRRRRUUUUUUUUURRRRRRR.D.LURRR.RR.URRRRRRRRRRRRRR',
+    'UULU..URRUU.RR.RUUUUR.DDDDRRRRRRRRRRRRRRRRRRRRUUUUUUUUUUUDUUUURRRRRRRRR',
+    'DLDLD.UDDDLLLLLLLLLL.LLLL.UDLLLLLLLLLLL.LRRRRURRRLLLLLLLLLLLLLLLLLLLLL',
+    'DDDDDDRRRRRRRRR.LLLL.LD.....DUURUULDDRRRRRRRRR.RDDDDDDDR.UUUUUUURRRRRRRRRRDDDDDDDDDDDDDDRRDDRRRRRRRRRRRRRRRRRRR',
+    'LDDLDDLLLLLLLLUUUUUUDLLU.RR.LLDDDDDDDLLLLLLLLLLLLLLLLLLLLLLLLLLLLUUUUUUUUUUUUUUUUULLLLLLLLLLLL',
   ];
   const movements = { U: [0, -1], D: [0, 1], L: [-1, 0], R: [1, 0], '.': [0, 0] };
   const game = core.createGame(0);
@@ -374,6 +455,6 @@ test('heading directly through patrols can get the player caught and a retry sta
   const retry = core.createGame(2);
   assert.equal(retry.floor.number, 5);
   assert.equal(retry.phase, 'playing');
-  assert.equal(retry.player.stamina, 3);
+  assert.equal(retry.player.stamina, 4);
   assert.notDeepEqual(retry.floor.tiles, originalTiles);
 });

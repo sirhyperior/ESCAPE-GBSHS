@@ -29,6 +29,9 @@
   };
   const STEP = 1 / 60;
   const FULL_TURN = 2 * Math.PI;
+  const BEAM_SAMPLE_ANGLE = Math.PI / 60;
+  const LAYER_MAX_TILE_PIXELS = 64;
+  const SCENE_PIXEL_BUDGET = 3_000_000;
   const GUARD_CUE_LIGHT = { range: 8, halfAngle: Math.PI };
   const EFFECT_MS = { floor: 1150, escaped: 820, caught: 680 };
 
@@ -41,6 +44,8 @@
   let pixelRatio = 1;
   let previousFrame = 0;
   let accumulator = 0;
+  let previousPose = null;
+  let sceneLayer = null;
   let dirty = true;
   let sprintReleased = false;
   let soundEnabled = true;
@@ -49,7 +54,8 @@
   function resize() {
     width = canvas.clientWidth;
     height = canvas.clientHeight;
-    pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    const detailRatio = Math.sqrt(SCENE_PIXEL_BUDGET / Math.max(1, width * height));
+    pixelRatio = Math.min(window.devicePixelRatio || 1, 2, Math.max(1, detailRatio));
     canvas.width = Math.round(width * pixelRatio);
     canvas.height = Math.round(height * pixelRatio);
     dirty = true;
@@ -60,6 +66,7 @@
     sprintReleased = false;
     accumulator = 0;
     previousFrame = 0;
+    previousPose = null;
   }
 
   function applySoundPreference() {
@@ -102,6 +109,8 @@
   function beginTransition(kind, time) {
     transition = { kind, endsAt: time + EFFECT_MS[kind] };
     accumulator = 0;
+    previousPose = null;
+    dirty = true;
     transitionOverlay.dataset.effect = kind;
     transitionOverlay.style.setProperty('--effect-duration', `${EFFECT_MS[kind]}ms`);
     floorAnnouncement.textContent = kind === 'floor' ? `${game.floor.number}층` : '';
@@ -152,34 +161,45 @@
     alert.hidden = status === '';
   }
 
-  function beamPath(tiles, actor, light) {
+  function wallCorners({tiles, width, height}) {
+    const rows = Array.from({length: height + 1}, () => []);
+    for (let y = 0; y <= height; y += 1) {
+      for (let x = 0; x <= width; x += 1) {
+        const topLeft = core.isWall(tiles, x - 1, y - 1, width);
+        const topRight = core.isWall(tiles, x, y - 1, width);
+        const bottomLeft = core.isWall(tiles, x - 1, y, width);
+        const bottomRight = core.isWall(tiles, x, y, width);
+        if (topLeft === topRight && bottomLeft === bottomRight) continue;
+        if (topLeft === bottomLeft && topRight === bottomRight) continue;
+        rows[y].push(x);
+      }
+    }
+    return rows;
+  }
+
+  function beamPath({tiles, width}, actor, light) {
     const angles = [];
-    const samples = Math.ceil(light.halfAngle * 360 / Math.PI);
+    const samples = Math.ceil(2 * light.halfAngle / BEAM_SAMPLE_ANGLE);
     for (let index = 0; index <= samples; index += 1) {
       angles.push(light.halfAngle * (2 * index / samples - 1));
     }
 
-    const range = light.range;
-    const minY = Math.floor(actor.y - range);
-    const maxY = Math.ceil(actor.y + range);
-    const minX = Math.floor(actor.x - range);
-    const maxX = Math.ceil(actor.x + range);
+    const { range } = light;
+    const corners = sceneLayer.corners;
+    const minY = Math.max(0, Math.ceil(actor.y - range));
+    const maxY = Math.min(corners.length - 1, Math.floor(actor.y + range));
+    const heading = Math.atan2(Math.sin(actor.angle), Math.cos(actor.angle));
 
     // Include both sides of wall corners so the edge of a shadow stays sharp.
     for (let y = minY; y <= maxY; y += 1) {
-      for (let x = minX; x <= maxX; x += 1) {
+      for (const x of corners[y]) {
         const dx = x - actor.x;
         const dy = y - actor.y;
         if (dx * dx + dy * dy > range * range) continue;
-        const angle = Math.atan2(dy, dx) - actor.angle;
-        const relative = Math.atan2(Math.sin(angle), Math.cos(angle));
+        let relative = Math.atan2(dy, dx) - heading;
+        if (relative > Math.PI) relative -= FULL_TURN;
+        if (relative < -Math.PI) relative += FULL_TURN;
         if (Math.abs(relative) >= light.halfAngle - 0.0001) continue;
-        const topLeft = core.isWall(tiles, x - 1, y - 1);
-        const topRight = core.isWall(tiles, x, y - 1);
-        const bottomLeft = core.isWall(tiles, x - 1, y);
-        const bottomRight = core.isWall(tiles, x, y);
-        if (topLeft === topRight && bottomLeft === bottomRight) continue;
-        if (topLeft === bottomLeft && topRight === bottomRight) continue;
         angles.push(relative - 0.0001, relative, relative + 0.0001);
       }
     }
@@ -191,7 +211,7 @@
       const angle = actor.angle + relative;
       const dx = Math.cos(angle);
       const dy = Math.sin(angle);
-      const distance = core.castRay(tiles, actor.x, actor.y, dx, dy, range);
+      const distance = core.castRay(tiles, actor.x, actor.y, dx, dy, range, core.isWall, width);
       const x = actor.x + dx * distance;
       const y = actor.y + dy * distance;
       if (fullCircle && index === 0) path.moveTo(x, y);
@@ -201,17 +221,18 @@
     return path;
   }
 
-  function drawFloor(floor, actor, range) {
-    const minX = Math.max(1, Math.floor(actor.x - range));
-    const maxX = Math.min(core.WIDTH - 2, Math.floor(actor.x + range));
-    const minY = Math.max(1, Math.floor(actor.y - range));
-    const maxY = Math.min(core.HEIGHT - 2, Math.floor(actor.y + range));
+  function drawFloor(context, floor, actor, range) {
+    const { tiles, width, height } = floor;
+    const minX = actor ? Math.max(1, Math.floor(actor.x - range)) : 1;
+    const maxX = actor ? Math.min(width - 2, Math.floor(actor.x + range)) : width - 2;
+    const minY = actor ? Math.max(1, Math.floor(actor.y - range)) : 1;
+    const maxY = actor ? Math.min(height - 2, Math.floor(actor.y + range)) : height - 2;
     const edges = new Path2D();
 
     for (let y = minY; y <= maxY; y += 1) {
       for (let x = minX; x <= maxX; x += 1) {
-        const tile = core.tileAt(x, y);
-        if (core.isWall(floor.tiles, x, y)) continue;
+        const tile = core.tileAt(x, y, width);
+        if (core.isWall(tiles, x, y, width)) continue;
         const colors = floor.roomsByTile[tile] === -1 ? corridorColors : floorColors;
         context.fillStyle = colors[(x * 31 + y * 17) % colors.length];
         context.fillRect(x, y, 1, 1);
@@ -219,10 +240,10 @@
         context.fillRect(x, y, 1, 0.018);
         context.fillRect(x, y, 0.018, 1);
 
-        const above = core.isWall(floor.tiles, x, y - 1);
-        const below = core.isWall(floor.tiles, x, y + 1);
-        const left = core.isWall(floor.tiles, x - 1, y);
-        const right = core.isWall(floor.tiles, x + 1, y);
+        const above = core.isWall(tiles, x, y - 1, width);
+        const below = core.isWall(tiles, x, y + 1, width);
+        const left = core.isWall(tiles, x - 1, y, width);
+        const right = core.isWall(tiles, x + 1, y, width);
 
         if (floor.doorways[tile] === 1) {
           context.fillStyle = '#9d875d';
@@ -259,7 +280,7 @@
     context.stroke(edges);
   }
 
-  function drawFurniture(object) {
+  function drawFurniture(context, object) {
     const { kind, x, y, width, height, fabric, solid } = object;
     const length = Math.max(width, height);
     context.save();
@@ -339,27 +360,47 @@
     context.restore();
   }
 
-  function drawRooms(floor, player) {
+  function buildSceneLayer(floor, tilePixels) {
+    const layer = document.createElement('canvas');
+    layer.width = floor.width * tilePixels;
+    layer.height = floor.height * tilePixels;
+    const target = layer.getContext('2d');
+    target.scale(tilePixels, tilePixels);
+    drawFloor(target, floor);
+    for (const object of floor.furniture) drawFurniture(target, object);
+    return { floor, layer, tilePixels, corners: wallCorners(floor) };
+  }
+
+  function drawSceneLayer(player) {
     const { range } = core.PLAYER_LIGHT;
-    for (const object of floor.furniture) {
-      if (Math.abs(object.x + object.width / 2 - player.x) > range + 1 ||
-          Math.abs(object.y + object.height / 2 - player.y) > range + 1) continue;
-      drawFurniture(object);
-    }
+    const { floor, layer, tilePixels } = sceneLayer;
+    const left = Math.max(0, Math.floor(player.x - range));
+    const top = Math.max(0, Math.floor(player.y - range));
+    const columns = Math.min(floor.width, Math.ceil(player.x + range)) - left;
+    const rows = Math.min(floor.height, Math.ceil(player.y + range)) - top;
+    context.drawImage(layer, left * tilePixels, top * tilePixels, columns * tilePixels, rows * tilePixels,
+      left, top, columns, rows);
+  }
+
+  function drawRoomLabels(floor, player) {
+    const range = core.PLAYER_LIGHT.range + 1;
     context.font = '700 0.21px "Malgun Gothic", sans-serif';
     context.textAlign = 'center';
     context.textBaseline = 'middle';
     context.fillStyle = '#c9ccae';
     for (const room of floor.rooms) {
-      const first = core.tileCenter(room.entrance.wall[0]);
-      const last = core.tileCenter(room.entrance.wall[1]);
+      const first = core.tileCenter(room.entrance.wall[0], floor.width);
+      const last = core.tileCenter(room.entrance.wall[1], floor.width);
+      const x = (first.x + last.x) / 2;
+      const y = (first.y + last.y) / 2;
+      if (Math.abs(x - player.x) > range || Math.abs(y - player.y) > range) continue;
       const label = room.lounge ? '휴게실' : `${floor.number * 100 + room.number}호`;
-      context.fillText(label, (first.x + last.x) / 2, (first.y + last.y) / 2);
+      context.fillText(label, x, y);
     }
   }
 
   function drawGoal(floor) {
-    const { x, y } = core.tileCenter(floor.goalTile);
+    const { x, y } = core.tileCenter(floor.goalTile, floor.width);
     const exit = floor.number === 1;
     const accent = exit ? '#a9e6b9' : '#f3d991';
     context.fillStyle = exit ? '#233e31' : '#423c28';
@@ -412,8 +453,8 @@
     context.restore();
   }
 
-  function createGuardLamp(tiles, guard, light) {
-    const beam = beamPath(tiles, guard, light);
+  function createGuardLamp(floor, guard, light) {
+    const beam = beamPath(floor, guard, light);
     const glow = context.createRadialGradient(guard.x, guard.y, 0, guard.x, guard.y, light.range);
     if (guard.mode === 'patrol') {
       glow.addColorStop(0, '#f5bf5f9c');
@@ -432,9 +473,9 @@
     }
   }
 
-  function drawGuardCues(tiles, player, lamps) {
+  function drawGuardCues(floor, player, lamps) {
     const observer = { x: player.x, y: player.y, angle: 0 };
-    const sight = beamPath(tiles, observer, GUARD_CUE_LIGHT);
+    const sight = beamPath(floor, observer, GUARD_CUE_LIGHT);
     context.save();
     context.clip(sight);
     context.globalAlpha = 0.32;
@@ -448,7 +489,7 @@
         x: guard.x + Math.cos(guard.angle) * core.GUARD_RADIUS,
         y: guard.y + Math.sin(guard.angle) * core.GUARD_RADIUS,
       };
-      if (!core.seesTarget(tiles, observer, source, GUARD_CUE_LIGHT)) continue;
+      if (!core.seesTarget(floor.tiles, observer, source, GUARD_CUE_LIGHT, floor.width)) continue;
       context.beginPath();
       context.arc(source.x, source.y, 0.067, 0, FULL_TURN);
       context.fill();
@@ -515,10 +556,29 @@
     }
   }
 
+  function actorPose({ x, y, angle }) {
+    return { x, y, angle };
+  }
+
+  function interpolatePose(actor, previous, fraction, rotate = false) {
+    const x = previous.x + (actor.x - previous.x) * fraction;
+    const y = previous.y + (actor.y - previous.y) * fraction;
+    const difference = actor.angle - previous.angle;
+    const angle = rotate ? previous.angle + Math.atan2(Math.sin(difference), Math.cos(difference)) * fraction : actor.angle;
+    return { x, y, angle, mode: actor.mode };
+  }
+
   function drawScene() {
-    const { floor, player } = game;
+    const { floor } = game;
+    const fraction = Math.min(1, accumulator / STEP);
+    const player = previousPose ? interpolatePose(game.player, previousPose.player, fraction) : game.player;
+    const guards = previousPose ? floor.guards.map((guard, index) => (
+      previousPose.guards[index] ? interpolatePose(guard, previousPose.guards[index], fraction, true) : guard
+    )) : floor.guards;
     const intro = view === 'start';
     const scale = Math.max(24, Math.min(68, width / 19, height / 12));
+    const tilePixels = Math.min(LAYER_MAX_TILE_PIXELS, Math.ceil(scale * pixelRatio));
+    if (sceneLayer?.floor !== floor || sceneLayer.tilePixels !== tilePixels) sceneLayer = buildSceneLayer(floor, tilePixels);
     const focusX = intro ? width * 0.74 : width / 2;
     const focusY = intro ? height * 0.55 : height / 2;
 
@@ -531,24 +591,24 @@
 
     if (intro) {
       context.globalAlpha = 0.18;
-      drawFloor(floor, player, 14);
+      drawFloor(context, floor, player, 14);
       context.globalAlpha = 1;
     }
 
     const cueRange = intro ? core.PLAYER_LIGHT.range : GUARD_CUE_LIGHT.range;
     const lamps = [];
-    for (const guard of floor.guards) {
+    for (const guard of guards) {
       const light = core.guardLight(guard);
       if (Math.hypot(guard.x - player.x, guard.y - player.y) > cueRange + light.range) continue;
-      lamps.push(createGuardLamp(floor.tiles, guard, light));
+      lamps.push(createGuardLamp(floor, guard, light));
     }
-    if (!intro && lamps.length > 0) drawGuardCues(floor.tiles, player, lamps);
+    if (!intro && lamps.length > 0) drawGuardCues(floor, player, lamps);
 
-    const playerBeam = beamPath(floor.tiles, player, core.PLAYER_LIGHT);
+    const playerBeam = beamPath(floor, player, core.PLAYER_LIGHT);
     context.save();
     context.clip(playerBeam);
-    drawFloor(floor, player, core.PLAYER_LIGHT.range);
-    drawRooms(floor, player);
+    drawSceneLayer(player);
+    drawRoomLabels(floor, player);
 
     const light = context.createRadialGradient(player.x, player.y, 0.1, player.x, player.y, core.PLAYER_LIGHT.range);
     light.addColorStop(0, '#fff0b945');
@@ -566,7 +626,7 @@
 
     drawActor(player, core.PLAYER_RADIUS, '#a6c3ac', '#d0e4c8', '#fff0b7');
     context.restore();
-    if (!intro) drawTrackedGuards(floor.guards, player, scale);
+    if (!intro) drawTrackedGuards(guards, player, scale);
   }
 
   function advance(time) {
@@ -583,9 +643,12 @@
     }
 
     accumulator += elapsed;
+    dirty = true;
+    if (accumulator < STEP) return;
     while (accumulator >= STEP) {
       const { floor, player } = game;
       const { x, y, stamina: previousStamina } = player;
+      previousPose = { player: actorPose(player), guards: floor.guards.map(actorPose) };
       core.step(game, input(), STEP);
       accumulator -= STEP;
       if (game.phase !== 'playing' || game.floor !== floor) {
@@ -601,13 +664,12 @@
         alerted: floor.guards.some(guard => guard.mode !== 'patrol'),
       }, STEP);
     }
+    updateHud();
   }
 
   function frame(time) {
     if (view === 'playing' && !document.hidden) {
       advance(time);
-      updateHud();
-      dirty = true;
     }
     if (dirty && width > 0 && height > 0) {
       drawScene();
