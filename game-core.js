@@ -8,6 +8,8 @@
   } = map;
   const MIN_ROUTE = 26;
   const MIN_GUARD_DISTANCE = 12;
+  const GUARD_SPAWN_SPACING = 7;
+  const GOAL_PATROL_CLEARANCE = 3;
   const GUARD_COUNTS = [0, 4, 3, 3, 2, 1];
   const PLAYER_RADIUS = 0.25;
   const GUARD_RADIUS = 0.24;
@@ -31,15 +33,36 @@
   const PATROL_LIGHT = Object.freeze({ range: 6.5, halfAngle: 55 * Math.PI / 180 });
   const CHASE_LIGHT = Object.freeze({ range: 8.25, halfAngle: 70 * Math.PI / 180 });
 
-  function doorwayLookouts(rooms, routes) {
-    const routeTiles = new Set(routes.flat());
+  function corridorLinks(routes, goalTile, width) {
+    const goal = tileCenter(goalTile, width);
+    const links = new Map();
+    for (const route of routes) {
+      let previous;
+      for (const tile of route) {
+        const { x, y } = tileCenter(tile, width);
+        if (Math.abs(x - goal.x) + Math.abs(y - goal.y) < GOAL_PATROL_CLEARANCE) {
+          previous = undefined;
+          continue;
+        }
+        if (!links.has(tile)) links.set(tile, new Set());
+        if (previous !== undefined) {
+          links.get(previous).add(tile);
+          links.get(tile).add(previous);
+        }
+        previous = tile;
+      }
+    }
+    return links;
+  }
+
+  function doorwayLookouts(rooms, patrolLinks) {
     const lookouts = new Map();
     for (const { entrance } of rooms) {
       for (let index = 0; index < entrance.hall.length; index += 1) {
         const hall = entrance.hall[index];
         const inward = entrance.wall[index] - hall;
-        const tile = routeTiles.has(hall) ? hall : hall - inward;
-        if (!routeTiles.has(tile)) continue;
+        const tile = patrolLinks.has(hall) ? hall : hall - inward;
+        if (!patrolLinks.has(tile)) continue;
         if (!lookouts.has(tile)) lookouts.set(tile, []);
         lookouts.get(tile).push(entrance.inside[index]);
       }
@@ -51,7 +74,7 @@
     const random = randomSource(seed);
     const layout = createLayout(random, kind, 5 - number);
     const { tiles, rooms, routes, width } = layout;
-    const [main, bypass] = routes;
+    const [main] = routes;
     const bedrooms = rooms.filter(room => !room.lounge);
     const ends = [main[0], main.at(-1)].map(tile => {
       const { distance } = walkableTiles(tiles, tile, -1, width);
@@ -69,52 +92,32 @@
     const spawnTile = choose(starts.slice(0, 2), random).tile;
     const goalTile = goal.tile;
     const goalTiles = [goalTile - width, goalTile, goalTile + width];
-    const lookouts = doorwayLookouts(rooms, routes);
-    const floor = { ...layout, number, spawnTile, goalTile, goalTiles, lookouts, random, guards: [] };
+    const patrolLinks = corridorLinks(routes, goalTile, width);
+    const lookouts = doorwayLookouts(rooms, patrolLinks);
+    const floor = { ...layout, number, spawnTile, goalTile, goalTiles, patrolLinks, lookouts, random, guards: [] };
 
     const distance = walkableTiles(tiles, spawnTile, -1, width).distance;
-    const count = GUARD_COUNTS[number];
-    // Floor 5 leaves the entry half of the main corridor open for learning the controls.
-    const middle = Math.floor(main.length / 2);
-    const entranceAtStart = goalTile === main.at(-1);
-    const patrolStart = number === 5 && entranceAtStart ? middle : 3;
-    const patrolEnd = number === 5 && !entranceAtStart ? middle : main.length - 3;
-    const hallway = main.slice(patrolStart, patrolEnd);
     const exit = tileCenter(goalTile, width);
-    const safe = tile => {
+    let candidates = [...patrolLinks.keys()].filter(tile => {
       const point = tileCenter(tile, width);
       return distance[tile] >= MIN_GUARD_DISTANCE && Math.hypot(point.x - exit.x, point.y - exit.y) >= 4;
-    };
-    const hallSpawns = hallway.filter(safe);
-    const sideSpawns = bypass.filter(safe);
-    const occupied = new Set();
-    for (let index = 0; index < count; index += 1) {
-      const useBypass = index > 0 && index === count - 1 && sideSpawns.some(tile => !occupied.has(tile));
-      const route = useBypass ? bypass : hallway;
-      const candidates = shuffle((useBypass ? sideSpawns : hallSpawns).filter(tile => !occupied.has(tile)), random);
-      if (index === 0) candidates.sort((a, b) => distance[a] - distance[b]);
-      else {
-        const separation = tile => {
-          const point = tileCenter(tile, width);
-          return Math.min(...floor.guards.map(guard => Math.hypot(guard.x - point.x, guard.y - point.y)));
-        };
-        candidates.sort((a, b) => separation(b) - separation(a));
-      }
-      const tile = index === 0 ? choose(candidates.slice(0, 3), random) : candidates[0];
-      occupied.add(tile);
-
-      const startIndex = route.indexOf(tile);
-      const reach = choose([8, 10, 12], random);
-      const first = Math.max(0, startIndex - reach);
-      const patrolRoute = route.slice(first, startIndex + reach + 1);
+    });
+    for (let index = 0; index < GUARD_COUNTS[number]; index += 1) {
+      const separation = tile => {
+        const point = tileCenter(tile, width);
+        return Math.min(...floor.guards.map(guard => Math.hypot(guard.x - point.x, guard.y - point.y)));
+      };
+      const spaced = candidates.filter(tile => separation(tile) >= GUARD_SPAWN_SPACING);
+      const tile = spaced.length ? choose(spaced, random) :
+        candidates.reduce((farthest, tile) => separation(tile) > separation(farthest) ? tile : farthest);
+      candidates = candidates.filter(candidate => candidate !== tile);
       const guard = {
         ...tileCenter(tile, width),
         angle: 0,
         targetAngle: 0,
         mode: 'patrol',
-        patrolRoute,
-        routeIndex: startIndex - first,
-        direction: choose([-1, 1], random),
+        patrolTile: tile,
+        previousPatrolTile: -1,
         lookTime: 0,
         lookCooldown: 1 + 2 * random(),
         path: [],
@@ -124,7 +127,7 @@
         unseenTime: 0,
         noticeTime: 0,
       };
-      choosePatrolPath(guard, width);
+      choosePatrolPath(floor, guard);
       const next = guard.path[guard.pathIndex];
       guard.angle = guard.targetAngle = Math.atan2(next.y - guard.y, next.x - guard.x);
       floor.guards.push(guard);
@@ -316,7 +319,7 @@
     rejoinPatrol(floor, guard);
   }
 
-  function rejoinPatrol({tiles, width, guards}, guard, avoidGuards = false) {
+  function rejoinPatrol({tiles, width, guards, patrolLinks}, guard, avoidGuards = false) {
     const start = tileAt(guard.x, guard.y, width);
     const open = avoidGuards ? tiles.slice() : tiles;
     let stepsByDirection;
@@ -337,25 +340,31 @@
     }
 
     const { distance, previous } = walkableTiles(open, start, -1, width, stepsByDirection);
-    const route = guard.patrolRoute;
     let closest = Infinity;
-    for (let index = 0; index < route.length; index += 1) {
-      const steps = distance[route[index]];
+    for (const tile of patrolLinks.keys()) {
+      const steps = distance[tile];
       if (steps < 0 || steps >= closest) continue;
       closest = steps;
-      guard.routeIndex = index;
+      guard.patrolTile = tile;
     }
-    if (closest < Infinity) setPathFromSearch(guard, route[guard.routeIndex], previous, width);
+    if (closest < Infinity) {
+      guard.previousPatrolTile = -1;
+      setPathFromSearch(guard, guard.patrolTile, previous, width);
+    }
   }
 
-  function choosePatrolPath(guard, width) {
-    const route = guard.patrolRoute;
-    const next = guard.routeIndex + guard.direction;
-    if (next < 0 || next >= route.length) guard.direction *= -1;
-    guard.routeIndex += guard.direction;
-    guard.path = [tileCenter(route[guard.routeIndex], width)];
+  function setPatrolStep(guard, tile, width) {
+    guard.previousPatrolTile = guard.patrolTile;
+    guard.patrolTile = tile;
+    guard.path = [tileCenter(tile, width)];
     guard.pathIndex = 0;
     guard.pathTarget = -1;
+  }
+
+  function choosePatrolPath(floor, guard) {
+    const next = [...floor.patrolLinks.get(guard.patrolTile)].filter(tile => tile !== guard.previousPatrolTile);
+    const tile = next.length > 1 ? choose(next, floor.random) : next[0] ?? guard.previousPatrolTile;
+    setPatrolStep(guard, tile, floor.width);
   }
 
   function patrol(floor, guard, dt) {
@@ -367,7 +376,7 @@
 
     let travel = followPath(floor, guard, PATROL_SPEED * dt);
     while (travel > EPSILON) {
-      const places = floor.lookouts.get(guard.patrolRoute[guard.routeIndex]);
+      const places = floor.lookouts.get(guard.patrolTile);
       if (places && guard.lookCooldown === 0 && floor.random() < 0.58) {
         const point = tileCenter(choose(places, floor.random), floor.width);
         guard.targetAngle = Math.atan2(point.y - guard.y, point.x - guard.x);
@@ -375,13 +384,12 @@
         guard.lookCooldown = 3 + floor.random() * 2;
         return;
       }
-      choosePatrolPath(guard, floor.width);
+      choosePatrolPath(floor, guard);
       travel = followPath(floor, guard, travel);
     }
     if (travel < 0) {
       if (guard.pathTarget === -1) {
-        guard.direction *= -1;
-        choosePatrolPath(guard, floor.width);
+        setPatrolStep(guard, guard.previousPatrolTile, floor.width);
       } else {
         rejoinPatrol(floor, guard, true);
         guard.lookTime = 0.2;

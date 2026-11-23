@@ -3,6 +3,7 @@
 
   const core = window.DormEscape;
   const audio = window.DormAudio.create();
+  const dialogue = window.DormDialogue.create(document.getElementById('dialogue'), audio.playDialogue);
   const canvas = document.getElementById('scene');
   const context = canvas.getContext('2d', { alpha: false });
   const hud = document.getElementById('hud');
@@ -34,6 +35,7 @@
   const SCENE_PIXEL_BUDGET = 3_000_000;
   const GUARD_CUE_LIGHT = { range: 8, halfAngle: Math.PI };
   const EFFECT_MS = { floor: 1150, escaped: 820, caught: 680 };
+  const OPENING_DIALOGUE = ['아... 개같은 학교 때려치워야지'];
 
   let game = core.createGame(17029);
   let seed;
@@ -89,6 +91,7 @@
   }
 
   function startGame() {
+    const firstStart = view === 'start';
     const nextSeed = crypto.getRandomValues(new Uint32Array(1))[0];
     seed = nextSeed === seed ? (nextSeed + 1) >>> 0 : nextSeed;
     game = core.createGame(seed);
@@ -99,15 +102,23 @@
     hud.hidden = false;
     dirty = true;
     updateHud();
-    beginTransition('floor', performance.now());
+    beginTransition('floor', performance.now(), firstStart ? () => showDialogue(OPENING_DIALOGUE) : null);
     const initialFloor = game.floor;
     audio.unlock().then(ready => {
       if (ready && game.floor === initialFloor && transition?.kind === 'floor') audio.play('floor');
     });
   }
 
-  function beginTransition(kind, time) {
-    transition = { kind, endsAt: time + EFFECT_MS[kind] };
+  function showDialogue(lines) {
+    dialogue.open(lines);
+    if (!dialogue.active) return;
+    clearKeys();
+    hud.hidden = true;
+    dirty = true;
+  }
+
+  function beginTransition(kind, time, onComplete = null) {
+    transition = { kind, endsAt: time + EFFECT_MS[kind], onComplete };
     accumulator = 0;
     previousPose = null;
     dirty = true;
@@ -382,6 +393,20 @@
       left, top, columns, rows);
   }
 
+  function drawDialogueRoom(floor, player) {
+    const tile = core.tileAt(player.x, player.y, floor.width);
+    const room = floor.rooms[floor.roomsByTile[tile]];
+    if (!room) return;
+
+    context.save();
+    context.beginPath();
+    context.rect(room.left, room.top, room.width, room.height);
+    context.clip();
+    context.globalAlpha = 0.42;
+    drawSceneLayer(player);
+    context.restore();
+  }
+
   function drawRoomLabels(floor, player) {
     const range = core.PLAYER_LIGHT.range + 1;
     context.font = '700 0.21px "Malgun Gothic", sans-serif';
@@ -594,6 +619,7 @@
       drawFloor(context, floor, player, 14);
       context.globalAlpha = 1;
     }
+    if (dialogue.active) drawDialogueRoom(floor, player);
 
     const cueRange = intro ? core.PLAYER_LIGHT.range : GUARD_CUE_LIGHT.range;
     const lamps = [];
@@ -634,11 +660,16 @@
     previousFrame = time;
     if (transition) {
       if (time >= transition.endsAt) {
-        const { kind } = transition;
+        const { kind, onComplete } = transition;
         transition = null;
         transitionOverlay.hidden = true;
         if (kind !== 'floor') showResult();
+        onComplete?.();
       }
+      return;
+    }
+    if (dialogue.active) {
+      dialogue.update(elapsed * 1000);
       return;
     }
 
@@ -679,6 +710,17 @@
   }
 
   window.addEventListener('keydown', event => {
+    if (dialogue.active) {
+      if (movementKeys.has(event.code) || event.code === 'KeyA') event.preventDefault();
+      if (event.code === 'KeyA' && !event.repeat) {
+        dialogue.next();
+        if (!dialogue.active) {
+          clearKeys();
+          hud.hidden = false;
+        }
+      }
+      return;
+    }
     if (view !== 'playing') {
       if (event.key === 'Enter' && !event.repeat && document.activeElement !== startButton && document.activeElement !== soundToggle) startGame();
       return;

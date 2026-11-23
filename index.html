@@ -9,6 +9,7 @@
     <script src="game-map.js" defer></script>
     <script src="game-core.js" defer></script>
     <script src="game-audio.js" defer></script>
+    <script src="game-dialogue.js" defer></script>
     <script src="game.js" defer></script>
   </head>
   <body>
@@ -40,6 +41,14 @@
 
       <div class="scene-transition" id="scene-transition" hidden>
         <div class="floor-announcement" id="floor-announcement" role="status"></div>
+      </div>
+
+      <div class="dialogue" id="dialogue" role="group" aria-label="대사" hidden>
+        <div class="dialogue-bubble">
+          <p class="dialogue-text" aria-hidden="true"><span class="dialogue-revealed"></span><span class="dialogue-remaining"></span></p>
+          <p class="dialogue-readable" role="status"></p>
+          <div class="dialogue-controls"><kbd>A</kbd><span class="dialogue-action"></span></div>
+        </div>
       </div>
 
       <section class="screen" id="screen" aria-labelledby="screen-title" data-screen="start">

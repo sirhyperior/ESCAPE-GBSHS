@@ -81,32 +81,37 @@
     const extraWidth = width - WIDTH;
     const extraHeight = height - HEIGHT;
     if (kind === 'straight') {
-      const y = choose([13, 15, 17], random) + extraHeight / 2;
-      const bypass = y + choose([-1, 1], random) * (7 + extraHeight / 2);
+      const y = choose([14, 15, 16], random) + extraHeight / 2;
+      const bypass = y + choose([-1, 1], random) * (9 + extraHeight / 2);
       const first = choose([13, 15, 17], random) + extraWidth / 4;
       const last = choose([26, 28, 30], random) + 3 * extraWidth / 4;
       return [
         [[left, y], [right, y]],
-        [[first, y], [first, bypass], [last, bypass], [last, y]],
+        [[left, y], [left, bypass], [right, bypass], [right, y]],
+        [[first, y], [first, bypass]],
+        [[last, y], [last, bypass]],
       ];
     }
     if (kind === 'dogleg') {
       const top = choose([9, 10, 11], random);
       const bottom = choose([19, 20, 21], random) + extraHeight;
       const turn = choose([20, 22, 24], random) + extraWidth / 2;
-      const bypass = turn - 9 - extraWidth / 4;
+      const bypass = Math.floor((top + bottom) / 2) + choose([-1, 0, 1], random);
       return [
         [[left, top], [turn, top], [turn, bottom], [right, bottom]],
-        [[bypass, top], [bypass, bottom], [turn, bottom]],
+        [[left, top], [left, bypass], [right, bypass], [right, bottom]],
       ];
     }
     const top = choose([8, 9, 10], random);
     const bottom = choose([19, 20, 21], random) + extraHeight;
     const west = choose([9, 10, 11], random) + extraWidth / 4;
     const east = choose([31, 32, 33], random) + 3 * extraWidth / 4;
+    const bypass = bottom + choose([4, 5, 6], random);
     return [
       [[left, top], [east, top], [east, bottom], [right, bottom]],
-      [[west, top], [west, bottom], [east, bottom]],
+      [[left, top], [left, bypass], [right, bypass], [right, bottom]],
+      [[west, top], [west, bypass]],
+      [[east, bottom], [east, bypass]],
     ];
   }
 
@@ -133,12 +138,7 @@
     return route;
   }
 
-  function roomEntrances({tiles, routes: [main], width, height}, random) {
-    // Put a usable doorway at the end of each corridor arm.
-    const first = main[0] - Math.sign(main[1] - main[0]);
-    const last = main.at(-1) + Math.sign(main.at(-1) - main.at(-2));
-    const terminals = new Map([[first - width, first], [first + width, first],
-      [last - width, last], [last + width, last]]);
+  function roomEntrances({tiles, width, height}, random) {
     const entries = [];
     for (let y = 2; y < height - 2; y += 1) {
       for (let x = 2; x < width - 2; x += 1) {
@@ -149,12 +149,11 @@
           const hall = [tileAt(x, y, width), tileAt(x + spanX, y + spanY, width)];
           const wall = hall.map(tile => tile + outX + outY * width);
           if (tiles[hall[1]] !== 0 || wall.some(tile => tiles[tile] !== WALL)) continue;
-          const terminal = outY === 0 ? undefined : terminals.get(hall[0]) ?? terminals.get(hall[1]);
-          entries.push({ x, y, outX, outY, hall, wall, terminal });
+          entries.push({ x, y, outX, outY, hall, wall });
         }
       }
     }
-    return shuffle(entries, random).sort((a, b) => Number(b.terminal !== undefined) - Number(a.terminal !== undefined));
+    return shuffle(entries, random);
   }
 
   function roomFits({tiles, width: mapWidth, height: mapHeight}, left, top, width, height) {
@@ -170,20 +169,22 @@
   function createRooms(layout, depth, random) {
     const { tiles, roomsByTile, doorways, width: mapWidth } = layout;
     const rooms = [];
-    const terminalRooms = new Set();
     const count = choose([7, 8, 8, 9, 10], random) + depth;
     const hasLounge = random() < LOUNGE_CHANCE;
     for (const entry of roomEntrances(layout, random)) {
-      const { x, y, outX, outY, hall, wall, terminal } = entry;
-      if (terminalRooms.has(terminal)) continue;
-      const lounge = hasLounge && terminal === undefined && rooms.length === terminalRooms.size;
+      const { x, y, outX, outY, hall, wall } = entry;
+      const lounge = hasLounge && rooms.length === 0;
       const sizes = shuffle((lounge ? LOUNGE_SIZES : BEDROOM_SIZES).slice(), random);
       for (const [width, height] of sizes) {
         const span = outX === 0 ? width : height;
-        const shift = choose(span === 4 ? [0, 2] : [1, span - 3], random);
-        const left = outX === 0 ? x - shift : x + 2 * outX - (outX < 0 ? width - 1 : 0);
-        const top = outY === 0 ? y - shift : y + 2 * outY - (outY < 0 ? height - 1 : 0);
-        if (!roomFits(layout, left, top, width, height)) continue;
+        const shifts = shuffle(span === 4 ? [0, 2] : [1, span - 3], random);
+        const placement = shifts.map(shift => ({
+          shift,
+          left: outX === 0 ? x - shift : x + 2 * outX - (outX < 0 ? width - 1 : 0),
+          top: outY === 0 ? y - shift : y + 2 * outY - (outY < 0 ? height - 1 : 0),
+        })).find(({left, top}) => roomFits(layout, left, top, width, height));
+        if (!placement) continue;
+        const { shift, left, top } = placement;
 
         const id = rooms.length;
         const tile = tileAt(left + Math.floor(width / 2), top + Math.floor(height / 2), mapWidth);
@@ -193,7 +194,6 @@
         const step = outX === 0 ? 1 : mapWidth;
         const hidingTile = shift >= afterDoor ? inside[0] - shift * step : inside[1] + afterDoor * step;
         rooms.push({ id, tile, left, top, width, height, entrance: { hall, wall, inside }, lounge, hidingTile });
-        if (terminal !== undefined) terminalRooms.add(terminal);
         for (let row = top; row < top + height; row += 1) {
           for (let column = left; column < left + width; column += 1) {
             const space = tileAt(column, row, mapWidth);

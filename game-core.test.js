@@ -26,6 +26,14 @@ function openFloor() {
   return game;
 }
 
+function setPatrolHall(floor, firstX, lastX, y) {
+  const route = Array.from({length: lastX - firstX + 1}, (_, index) => core.tileAt(firstX + index, y));
+  floor.patrolLinks = new Map(route.map((tile, index) => [
+    tile, new Set([route[index - 1], route[index + 1]].filter(neighbor => neighbor !== undefined)),
+  ]));
+  return route;
+}
+
 function followExitRoute(game) {
   const floors = [];
   let floor;
@@ -72,18 +80,16 @@ test('1,600 seeded floors have wide, connected corridors and furnished dorm room
       assert.ok(distance[floor.goalTile] >= 26);
       assert.ok(floor.goalTiles.every(tile => floor.roomsByTile[tile] === -1 && distance[tile] >= 0));
 
-      const [main, bypass] = floor.routes;
-      const ends = [main[0] - Math.sign(main[1] - main[0]), main.at(-1) + Math.sign(main.at(-1) - main.at(-2))];
-      for (const end of ends) {
-        assert.ok(floor.rooms.some(room => room.entrance.hall.some(tile => Math.abs(tile - end) === width)));
-      }
+      const [main, ...sideRoutes] = floor.routes;
       for (const tile of main) {
         for (const row of [tile - width, tile, tile + width]) {
           assert.ok([row - 1, row, row + 1].every(space => floor.tiles[space] === 0 && floor.roomsByTile[space] === -1));
         }
       }
-      for (const tile of bypass) {
-        assert.ok([tile, tile + 1, tile + width, tile + width + 1].every(space => floor.tiles[space] === 0 && floor.roomsByTile[space] === -1));
+      for (const route of sideRoutes) {
+        for (const tile of route) {
+          assert.ok([tile, tile + 1, tile + width, tile + width + 1].every(space => floor.tiles[space] === 0 && floor.roomsByTile[space] === -1));
+        }
       }
 
       assert.ok(floor.rooms.filter(room => room.lounge).length <= 1);
@@ -123,13 +129,8 @@ test('1,600 seeded floors have wide, connected corridors and furnished dorm room
         const spawn = core.tileAt(guard.x, guard.y, width);
         assert.ok(distance[spawn] >= 12);
         assert.equal(floor.roomsByTile[spawn], -1);
-        assert.ok(guard.patrolRoute.includes(spawn));
-        assert.ok(guard.patrolRoute.every(tile => floor.roomsByTile[tile] === -1 && floor.tiles[tile] === 0));
-        if (number === 5) {
-          const middle = Math.floor(main.length / 2);
-          const exitHalf = floor.goalTile === main[0] ? main.slice(0, middle) : main.slice(middle);
-          assert.ok(guard.patrolRoute.every(tile => exitHalf.includes(tile)));
-        }
+        assert.equal(guard.previousPatrolTile, spawn);
+        assert.ok(floor.patrolLinks.get(spawn).has(guard.patrolTile));
         spawns.add(spawn);
       }
       assert.equal(spawns.size, floor.guards.length);
@@ -139,6 +140,64 @@ test('1,600 seeded floors have wide, connected corridors and furnished dorm room
   assert.ok(lounges > 0 && lounges < 1600);
   assert.deepEqual(core.createFloor(5, 1).tiles, core.createFloor(5, 1).tiles);
   assert.notDeepEqual(core.createFloor(5, 1).tiles, core.createFloor(5, 2).tiles);
+});
+
+test('each layout has two separate approaches to the stairs and a connected patrol network', () => {
+  for (const kind of map.LAYOUTS) {
+    for (let seed = 0; seed < 80; seed += 1) {
+      for (let number = 5; number >= 1; number -= 1) {
+        const { width, routes: [main, bypass], tiles, spawnTile, goalTile, goalTiles, patrolLinks, roomsByTile } =
+          core.createFloor(number, seed, kind);
+        const fromEnd = goalTile === main[0] ? 2 : -3;
+        const mainApproach = main.at(fromEnd);
+        const sideApproach = bypass.at(fromEnd);
+        assert.equal(Math.abs(mainApproach - goalTile), 2);
+        assert.equal(Math.abs(sideApproach - goalTile), 2 * width);
+
+        const mainCut = [mainApproach - width, mainApproach, mainApproach + width];
+        const sideCut = [sideApproach, sideApproach + 1];
+        for (const cut of [mainCut, sideCut]) {
+          const blocked = tiles.slice();
+          for (const tile of cut) blocked[tile] = map.WALL;
+          const { distance } = core.walkableTiles(blocked, spawnTile, -1, width);
+          assert.ok(goalTiles.some(tile => distance[tile] >= 0), `${kind}, floor ${number}, seed ${seed}`);
+        }
+
+        const reached = new Set([patrolLinks.keys().next().value]);
+        for (const tile of reached) {
+          assert.equal(roomsByTile[tile], -1);
+          assert.equal(tiles[tile], 0);
+          assert.ok(!goalTiles.includes(tile));
+          for (const neighbor of patrolLinks.get(tile)) reached.add(neighbor);
+        }
+        assert.equal(reached.size, patrolLinks.size);
+        assert.ok(main.some(tile => reached.has(tile) && !bypass.includes(tile)));
+        assert.ok(bypass.some(tile => reached.has(tile) && !main.includes(tile)));
+      }
+    }
+  }
+});
+
+test('the fifth-floor guard moves between the main corridor and the bypass', () => {
+  for (const kind of map.LAYOUTS) {
+    const game = core.createGame(0);
+    const floor = core.createFloor(5, 0, kind);
+    game.floor = floor;
+    const room = floor.rooms.find(room => room.tile === floor.spawnTile);
+    Object.assign(game.player, core.tileCenter(room.hidingTile, floor.width));
+    const [main, bypass] = floor.routes;
+    const [guard] = floor.guards;
+    let visitedMain = false;
+    let visitedBypass = false;
+    for (let frame = 0; frame < 3600 && !(visitedMain && visitedBypass); frame += 1) {
+      tick(game, 1);
+      assert.equal(guard.mode, 'patrol');
+      const tile = core.tileAt(guard.x, guard.y, floor.width);
+      visitedMain ||= main.includes(tile) && !bypass.includes(tile);
+      visitedBypass ||= bypass.includes(tile) && !main.includes(tile);
+    }
+    assert.ok(visitedMain && visitedBypass, kind);
+  }
 });
 
 test('walls and corners block a flashlight even when the target is inside its cone', () => {
@@ -291,12 +350,12 @@ test('sight expands on detection and each guard clears its alert after 2.5 conti
 test('a patrolling guard pauses in the hall to turn its light into a doorway', () => {
   const game = openFloor();
   const guard = core.createFloor(5, 1).guards[0];
-  const route = [core.tileAt(10, 10), core.tileAt(11, 10), core.tileAt(12, 10)];
+  const route = setPatrolHall(game.floor, 10, 12, 10);
   const waypoint = route[1];
   Object.assign(game.player, { x: 30.5, y: 25.5 });
   Object.assign(guard, {
     ...core.tileCenter(route[0]),
-    angle: 0, direction: 1, patrolRoute: route, routeIndex: 1,
+    angle: 0, previousPatrolTile: route[0], patrolTile: waypoint,
     path: [core.tileCenter(waypoint)], pathIndex: 0, lookCooldown: 0,
   });
   game.floor.guards = [guard];
@@ -332,14 +391,14 @@ test('a guard takes the short arc when its heading crosses the angle boundary', 
 
 test('guards turn away from each other on a shared patrol route', () => {
   const game = openFloor();
-  const route = Array.from({length: 13}, (_, index) => core.tileAt(8 + index, 10));
+  const route = setPatrolHall(game.floor, 8, 20, 10);
   const guards = core.createFloor(4, 0).guards;
   const [first, second] = guards;
   Object.assign(game.player, { x: 30.5, y: 25.5 });
-  Object.assign(first, { x: 10.5, y: 10.5, angle: 0, direction: 1, routeIndex: 3 });
-  Object.assign(second, { x: 15.5, y: 10.5, angle: Math.PI, direction: -1, routeIndex: 6 });
+  Object.assign(first, { x: 10.5, y: 10.5, angle: 0, previousPatrolTile: route[2], patrolTile: route[3] });
+  Object.assign(second, { x: 15.5, y: 10.5, angle: Math.PI, previousPatrolTile: route[7], patrolTile: route[6] });
   for (const guard of guards) {
-    Object.assign(guard, { patrolRoute: route, path: [core.tileCenter(route[guard.routeIndex])], pathIndex: 0 });
+    Object.assign(guard, { path: [core.tileCenter(guard.patrolTile)], pathIndex: 0 });
   }
   game.floor.guards = guards;
 
@@ -369,25 +428,21 @@ test('pursuing guards keep from overlapping and can still catch the player', () 
   assert.ok(second.x > 16);
 });
 
-test('guards returning to patrol take different sides of the hallway', () => {
+test('a guard returning from a room rejoins the shared patrol network', () => {
   const game = openFloor();
-  game.floor.tiles.fill(1);
-  for (let y = 9; y <= 11; y += 1) {
-    for (let x = 3; x <= 31; x += 1) game.floor.tiles[core.tileAt(x, y)] = 0;
-  }
   Object.assign(game.player, { x: 30.5, y: 22.5 });
-  const [first, second] = core.createFloor(4, 0).guards;
-  const eastRoute = [16, 17, 18, 19, 20].map(x => core.tileAt(x, 10));
-  const westRoute = [7, 8, 9, 10, 11].map(x => core.tileAt(x, 10));
-  const searching = { y: 10.5, mode: 'search', unseenTime: 2.49 };
-  Object.assign(first, searching, { x: 10.5, angle: 0, patrolRoute: eastRoute });
-  Object.assign(second, searching, { x: 15.5, angle: Math.PI, patrolRoute: westRoute });
-  game.floor.guards = [first, second];
+  const [guard] = core.createFloor(5, 0).guards;
+  const hall = setPatrolHall(game.floor, 8, 20, 10);
+  Object.assign(guard, { x: 13.5, y: 14.5, mode: 'search', unseenTime: 2.49 });
+  game.floor.guards = [guard];
 
-  tick(game, 240);
-  assert.ok(eastRoute.includes(core.tileAt(first.x, first.y)));
-  assert.ok(westRoute.includes(core.tileAt(second.x, second.y)));
-  assert.ok(game.floor.guards.every(guard => guard.mode === 'patrol' && guard.pathTarget === -1));
+  tick(game, 1);
+  assert.equal(guard.pathTarget, core.tileAt(13, 10));
+  tick(game, 180);
+  assert.ok(hall.includes(core.tileAt(guard.x, guard.y)));
+  assert.ok(Math.abs(guard.x - 13.5) > 2);
+  assert.equal(guard.mode, 'patrol');
+  assert.equal(guard.pathTarget, -1);
 });
 
 test('stairs activate across the full hallway and leave the pursuing guard upstairs', () => {
@@ -421,11 +476,11 @@ test('a wider loop floor still starts in a bedroom far from the stairs', () => {
 test('waiting for patrols and taking side passages can clear all five floors unseen', () => {
   // One seed with a keyboard route of up, down, left, right and wait, one tile per symbol.
   const routes = [
-    'UUULUUUURRRRRRRRRUUUUUUUUURRRRRRR.D.LURRR.RR.URRRRRRRRRRRRRR',
-    'UULU..URRUU.RR.RUUUUR.DDDDRRRRRRRRRRRRRRRRRRRRUUUUUUUUUUUDUUUURRRRRRRRR',
-    'DLDLD.UDDDLLLLLLLLLL.LLLL.UDLLLLLLLLLLL.LRRRRURRRLLLLLLLLLLLLLLLLLLLLL',
-    'DDDDDDRRRRRRRRR.LLLL.LD.....DUURUULDDRRRRRRRRR.RDDDDDDDR.UUUUUUURRRRRRRRRRDDDDDDDDDDDDDDRRDDRRRRRRRRRRRRRRRRRRR',
-    'LDDLDDLLLLLLLLUUUUUUDLLU.RR.LLDDDDDDDLLLLLLLLLLLLLLLLLLLLLLLLLLLLUUUUUUUUUUUUUUUUULLLLLLLLLLLL',
+    'UUUULLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLDDDL',
+    'LLLDLLDDRRRR.LLLLUUUUUUUUUUUUUUUUUURRRRRRRRRRRRRRRRRRRRRDDDDRRRRRRRR',
+    'DDDLLLL.LLLLLLLLLLLLLLLLLLLUUUUUUUUULLLLLLLLLLLDDDDDDDDDL',
+    'UUUURRRRRRRRRRRRRRRRRRRRDDDDDDDDDDDDDDDDRRRRRRRRRRRRRRRRRRRRR',
+    'UUUUURRRRUUUUUUUUUUUUUUUUUUUUULLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL',
   ];
   const movements = { U: [0, -1], D: [0, 1], L: [-1, 0], R: [1, 0], '.': [0, 0] };
   const game = core.createGame(0);
@@ -434,13 +489,20 @@ test('waiting for patrols and taking side passages can clear all five floors uns
     const floor = game.floor;
     assert.equal(floor.number, 5 - index);
     kinds.add(floor.kind);
+    const [main, bypass] = floor.routes;
+    const approach = (index === 0 || index === 2 ? bypass : main).at(floor.goalTile === main[0] ? 2 : -3);
+    const approachTiles = index === 0 || index === 2 ? [approach, approach + 1] :
+      [approach - floor.width, approach, approach + floor.width];
+    let usedApproach = false;
     for (const action of route) {
       const [x, y] = movements[action];
       for (let frame = 0; frame < 20 && game.floor === floor && game.phase === 'playing'; frame += 1) {
         core.step(game, {x, y, sprint: false}, STEP);
         assert.ok(floor.guards.every(guard => guard.mode === 'patrol'));
+        usedApproach ||= game.floor === floor && approachTiles.includes(core.tileAt(game.player.x, game.player.y, floor.width));
       }
     }
+    assert.ok(usedApproach, `floor ${floor.number}`);
   }
   assert.equal(kinds.size, 3);
   assert.equal(game.phase, 'escaped');

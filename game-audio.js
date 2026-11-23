@@ -153,7 +153,13 @@
       }
     }
 
-    return { unlock, setEnabled, update, play };
+    function playDialogue(character) {
+      if (!ready()) return;
+      const pitch = 294 + (character.codePointAt(0) % 5) * 22;
+      tone(context.currentTime + 0.006, 0.036, 0.025, pitch, pitch * 0.9, 'square');
+    }
+
+    return { unlock, setEnabled, update, play, playDialogue };
   }
 
   root.DormAudio = { create };
