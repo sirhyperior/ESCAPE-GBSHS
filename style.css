@@ -4,15 +4,21 @@
   font-display: swap;
 }
 
+@font-face {
+  font-family: 'LeeSeoyun';
+  src: url('LeeSeoyun.woff') format('woff');
+  font-display: swap;
+}
+
 :root {
   color-scheme: dark;
-  font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', system-ui, sans-serif;
+  --game-font: 'LeeSeoyun', 'Malgun Gothic', 'Apple SD Gothic Neo', system-ui, sans-serif;
+  font-family: var(--game-font);
   --night: #080d0d;
   --paper: #f0ebd8;
   --muted: #b9bbb0;
   --gold: #e0ca87;
   --line: #42483d;
-  --mono: Consolas, 'SFMono-Regular', monospace;
 }
 
 * { box-sizing: border-box; }
@@ -68,11 +74,11 @@ body {
   align-items: baseline;
   gap: 7px;
   color: var(--gold);
-  font: 700 clamp(36px, 6vw, 64px)/0.9 var(--mono);
+  font: 700 clamp(36px, 6vw, 64px)/0.9 var(--game-font);
 }
 
 .floor-unit {
-  font: 700 18px/1 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
+  font: 700 18px/1 var(--game-font);
 }
 
 .objective {
@@ -105,7 +111,7 @@ body {
 
 .stamina-percent {
   color: var(--stamina-fill);
-  font: 700 16px/1 var(--mono);
+  font: 700 16px/1 var(--game-font);
 }
 
 .stamina-panel meter {
@@ -310,7 +316,7 @@ kbd {
   border-radius: 3px;
   background: #131b19;
   color: var(--paper);
-  font: 600 14px/1.25 var(--mono);
+  font: 600 14px/1.25 var(--game-font);
 }
 
 .screen {
@@ -348,7 +354,7 @@ h1 {
   font-size: clamp(48px, 8vw, 108px);
   font-weight: 900;
   line-height: 1.02;
-  letter-spacing: -0.075em;
+  letter-spacing: -0.035em;
 }
 
 .screen:not([data-screen='start']) h1 {
@@ -360,6 +366,12 @@ h1 {
   color: var(--muted);
   font-size: clamp(16px, 1.7vw, 20px);
   line-height: 1.6;
+}
+
+.screen .escape-time {
+  margin: 0;
+  color: var(--gold);
+  font-size: clamp(24px, 4vw, 36px);
 }
 
 button {

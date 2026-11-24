@@ -9,7 +9,7 @@
   const MIN_ROUTE = 26;
   const MIN_GUARD_DISTANCE = 12;
   const GUARD_SPAWN_SPACING = 7;
-  const GOAL_PATROL_CLEARANCE = 3;
+  const STAIR_PATROL_CLEARANCE = 3;
   const GUARD_COUNTS = [0, 4, 3, 3, 2, 1];
   const PLAYER_RADIUS = 0.25;
   const GUARD_RADIUS = 0.24;
@@ -30,17 +30,17 @@
   const SEARCH_TIME = 2.5;
   const EPSILON = 1e-9;
   const PLAYER_LIGHT = Object.freeze({ range: 5, halfAngle: 55 * Math.PI / 180 });
-  const PATROL_LIGHT = Object.freeze({ range: 6.5, halfAngle: 55 * Math.PI / 180 });
-  const CHASE_LIGHT = Object.freeze({ range: 8.25, halfAngle: 70 * Math.PI / 180 });
+  const PATROL_LIGHT = Object.freeze({ range: 6.5, halfAngle: 55 * Math.PI / 180, blocked: isSolid });
+  const CHASE_LIGHT = Object.freeze({ range: 8.25, halfAngle: 70 * Math.PI / 180, blocked: isSolid });
 
-  function corridorLinks(routes, goalTile, width) {
-    const goal = tileCenter(goalTile, width);
+  function corridorLinks(routes, stairTiles, width) {
+    const stairs = stairTiles.map(tile => tileCenter(tile, width));
     const links = new Map();
     for (const route of routes) {
       let previous;
       for (const tile of route) {
         const { x, y } = tileCenter(tile, width);
-        if (Math.abs(x - goal.x) + Math.abs(y - goal.y) < GOAL_PATROL_CLEARANCE) {
+        if (stairs.some(stair => Math.abs(x - stair.x) + Math.abs(y - stair.y) < STAIR_PATROL_CLEARANCE)) {
           previous = undefined;
           continue;
         }
@@ -53,6 +53,10 @@
       }
     }
     return links;
+  }
+
+  function stairLanding(main, tile) {
+    return tile === main[0] ? main[1] : main.at(-2);
   }
 
   function doorwayLookouts(rooms, patrolLinks) {
@@ -89,12 +93,21 @@
     const minimum = Math.min(MIN_ROUTE, goal.farthest);
     const starts = bedrooms.filter(room => goal.distance[room.tile] >= minimum);
     starts.sort((a, b) => entry.distance[a.tile] - entry.distance[b.tile]);
-    const spawnTile = choose(starts.slice(0, 2), random).tile;
+    const bedroomTile = choose(starts.slice(0, 2), random).tile;
     const goalTile = goal.tile;
     const goalTiles = [goalTile - width, goalTile, goalTile + width];
-    const patrolLinks = corridorLinks(routes, goalTile, width);
+    const upTile = number === 5 ? null : entry.tile;
+    const upTiles = upTile === null ? [] : [upTile - width, upTile, upTile + width];
+    const spawnTile = upTile === null ? bedroomTile : stairLanding(main, upTile);
+    const patrolLinks = corridorLinks(routes, upTile === null ? [goalTile] : [goalTile, upTile], width);
     const lookouts = doorwayLookouts(rooms, patrolLinks);
-    const floor = { ...layout, number, spawnTile, goalTile, goalTiles, patrolLinks, lookouts, random, guards: [] };
+    const difficulty = Math.max(0, 4 - number);
+    const patrolSpeed = PATROL_SPEED + 0.1 * difficulty;
+    const chaseSpeed = CHASE_SPEED + 0.15 * difficulty;
+    const floor = {
+      ...layout, number, spawnTile, goalTile, goalTiles, upTile, upTiles,
+      patrolLinks, lookouts, random, guards: [], patrolSpeed, chaseSpeed,
+    };
 
     const distance = walkableTiles(tiles, spawnTile, -1, width).distance;
     const exit = tileCenter(goalTile, width);
@@ -135,13 +148,39 @@
     return floor;
   }
 
+  function openLanding(floor, stair) {
+    const { width, routes: [main], guards } = floor;
+    const landing = stairLanding(main, stair);
+    const farther = 2 * landing - stair;
+    // Prefer the center in front of the stairs, with room to arrive past waiting guards.
+    const candidates = [landing, landing - width, landing + width, farther, farther - width, farther + width];
+    return candidates.find(tile => {
+      const { x, y } = tileCenter(tile, width);
+      return guards.every(guard => Math.hypot(x - guard.x, y - guard.y) > PLAYER_RADIUS + GUARD_RADIUS);
+    }) ?? landing;
+  }
+
   function enterFloor(game, number) {
-    const kind = game.layoutOrder[(5 - number) % game.layoutOrder.length];
-    const floor = createFloor(number, Math.floor(game.random() * 4294967296), kind);
-    const spawn = tileCenter(floor.spawnTile, floor.width);
-    const routeFromGoal = walkableTiles(floor.tiles, floor.goalTile, floor.spawnTile, floor.width);
-    const firstStep = tileCenter(routeFromGoal.previous[floor.spawnTile], floor.width);
-    Object.assign(game.player, spawn, { angle: Math.atan2(firstStep.y - spawn.y, firstStep.x - spawn.x) });
+    let floor = game.floors.get(number);
+    if (!floor) {
+      const kind = game.layoutOrder[(5 - number) % game.layoutOrder.length];
+      floor = createFloor(number, Math.floor(game.random() * 4294967296), kind);
+      game.floors.set(number, floor);
+    }
+    const { width, spawnTile, goalTile, upTile } = floor;
+    let arrival = spawnTile;
+    let angle;
+    if (game.floor) {
+      const stair = game.floor.number < number ? goalTile : upTile;
+      arrival = openLanding(floor, stair);
+      angle = stairLanding(floor.routes[0], stair) > stair ? 0 : Math.PI;
+    } else {
+      const { previous } = walkableTiles(floor.tiles, goalTile, spawnTile, width);
+      const from = tileCenter(spawnTile, width);
+      const next = tileCenter(previous[spawnTile], width);
+      angle = Math.atan2(next.y - from.y, next.x - from.x);
+    }
+    Object.assign(game.player, tileCenter(arrival, width), { angle });
     game.floor = floor;
   }
 
@@ -150,6 +189,7 @@
     const game = {
       random,
       layoutOrder: shuffle(LAYOUTS.slice(), random),
+      floors: new Map(),
       phase: 'playing',
       player: { x: 0, y: 0, angle: 0, stamina: MAX_STAMINA, restTime: 0, sprintLocked: false, exhausted: false },
       floor: null,
@@ -202,7 +242,7 @@
     const dy = y / distance;
     const facing = dx * Math.cos(actor.angle) + dy * Math.sin(actor.angle);
     return facing >= Math.cos(light.halfAngle) - EPSILON &&
-      castRay(tiles, actor.x, actor.y, dx, dy, distance, isWall, width) >= distance - EPSILON;
+      castRay(tiles, actor.x, actor.y, dx, dy, distance, light.blocked, width) >= distance - EPSILON;
   }
 
   function canStand({tiles, width}, x, y, radius) {
@@ -374,7 +414,7 @@
       return;
     }
 
-    let travel = followPath(floor, guard, PATROL_SPEED * dt);
+    let travel = followPath(floor, guard, floor.patrolSpeed * dt);
     while (travel > EPSILON) {
       const places = floor.lookouts.get(guard.patrolTile);
       if (places && guard.lookCooldown === 0 && floor.random() < 0.58) {
@@ -411,7 +451,7 @@
     const distance = Math.hypot(target.x - guard.x, target.y - guard.y);
     if (distance < EPSILON) return;
 
-    const travel = CHASE_SPEED * dt;
+    const travel = floor.chaseSpeed * dt;
     if (clearPath(floor, guard, target, distance)) {
       guard.pathTarget = -1;
       moveToward(floor, guard, target, travel);
@@ -464,9 +504,17 @@
     updatePlayer(game, input, dt);
     const { player, floor } = game;
 
-    if (floor.goalTiles.includes(tileAt(player.x, player.y, floor.width))) {
-      if (floor.number === 1) game.phase = 'escaped';
-      else enterFloor(game, floor.number - 1);
+    const tile = tileAt(player.x, player.y, floor.width);
+    const goingUp = floor.upTiles.includes(tile);
+    if (goingUp || floor.goalTiles.includes(tile)) {
+      if (floor.number === 1 && !goingUp) game.phase = 'escaped';
+      else {
+        for (const guard of floor.guards) {
+          guard.noticeTime = 0;
+          if (guard.mode !== 'patrol') returnToPatrol(floor, guard);
+        }
+        enterFloor(game, floor.number + (goingUp ? 1 : -1));
+      }
       return;
     }
 
@@ -481,7 +529,7 @@
 
   const core = {
     WIDTH, HEIGHT, PLAYER_RADIUS, GUARD_RADIUS, MAX_STAMINA, PLAYER_LIGHT,
-    createFloor, createGame, step, guardLight, isWall, tileAt, tileCenter, walkableTiles, castRay, seesTarget,
+    createFloor, createGame, step, guardLight, isWall, isSolid, tileAt, tileCenter, walkableTiles, castRay, seesTarget,
   };
 
   if (typeof module === 'object' && module.exports) module.exports = core;

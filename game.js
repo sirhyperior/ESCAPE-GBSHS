@@ -18,6 +18,7 @@
   const screen = document.getElementById('screen');
   const screenTitle = document.getElementById('screen-title');
   const screenDescription = document.getElementById('screen-description');
+  const escapeTime = document.getElementById('escape-time');
   const startControls = document.getElementById('start-controls');
   const startButton = document.getElementById('start');
   const soundToggle = document.getElementById('sound-toggle');
@@ -33,7 +34,9 @@
   const BEAM_SAMPLE_ANGLE = Math.PI / 60;
   const LAYER_MAX_TILE_PIXELS = 64;
   const SCENE_PIXEL_BUDGET = 3_000_000;
-  const GUARD_CUE_LIGHT = { range: 8, halfAngle: Math.PI };
+  const GUARD_CUE_LIGHT = { range: 8, halfAngle: Math.PI, blocked: core.isSolid };
+  const NEARBY_STAIR_SIGHT = { range: 2.4, halfAngle: Math.PI };
+  const GAME_FONT = getComputedStyle(document.documentElement).getPropertyValue('--game-font');
   const EFFECT_MS = { floor: 1150, escaped: 820, caught: 680 };
   const OPENING_DIALOGUE = ['아... 개같은 학교 때려치워야지'];
 
@@ -41,6 +44,8 @@
   let seed;
   let view = 'start';
   let transition = null;
+  let startedAt = 0;
+  let finishedAt = 0;
   let width = 0;
   let height = 0;
   let pixelRatio = 1;
@@ -92,17 +97,18 @@
 
   function startGame() {
     const firstStart = view === 'start';
+    startedAt = performance.now();
+    finishedAt = 0;
     const nextSeed = crypto.getRandomValues(new Uint32Array(1))[0];
     seed = nextSeed === seed ? (nextSeed + 1) >>> 0 : nextSeed;
     game = core.createGame(seed);
-    clearKeys();
     view = 'playing';
     startButton.blur();
     screen.hidden = true;
     hud.hidden = false;
     dirty = true;
     updateHud();
-    beginTransition('floor', performance.now(), firstStart ? () => showDialogue(OPENING_DIALOGUE) : null);
+    beginTransition('floor', startedAt, firstStart ? () => showDialogue(OPENING_DIALOGUE) : null);
     const initialFloor = game.floor;
     audio.unlock().then(ready => {
       if (ready && game.floor === initialFloor && transition?.kind === 'floor') audio.play('floor');
@@ -119,8 +125,7 @@
 
   function beginTransition(kind, time, onComplete = null) {
     transition = { kind, endsAt: time + EFFECT_MS[kind], onComplete };
-    accumulator = 0;
-    previousPose = null;
+    clearKeys();
     dirty = true;
     transitionOverlay.dataset.effect = kind;
     transitionOverlay.style.setProperty('--effect-duration', `${EFFECT_MS[kind]}ms`);
@@ -128,6 +133,13 @@
     floorAnnouncement.hidden = kind !== 'floor';
     transitionOverlay.hidden = false;
     if (kind !== 'floor') hud.hidden = true;
+  }
+
+  function formatDuration(milliseconds) {
+    const tenths = Math.floor(milliseconds / 100);
+    const minutes = String(Math.floor(tenths / 600)).padStart(2, '0');
+    const seconds = String(Math.floor(tenths / 10) % 60).padStart(2, '0');
+    return `${minutes}:${seconds}.${tenths % 10}`;
   }
 
   function showResult() {
@@ -140,6 +152,8 @@
     screenDescription.textContent = view === 'escaped'
       ? '1층 출구를 통과했습니다.'
       : `${game.floor.number}층에서 사감에게 붙잡혔습니다.`;
+    escapeTime.textContent = view === 'escaped' ? `소요 시간 ${formatDuration(finishedAt - startedAt)}` : '';
+    escapeTime.hidden = view !== 'escaped';
     startButton.textContent = '5층부터 다시 시작';
     screen.hidden = false;
     startButton.focus({ preventScroll: true });
@@ -172,14 +186,14 @@
     alert.hidden = status === '';
   }
 
-  function wallCorners({tiles, width, height}) {
+  function obstacleCorners({tiles, width, height}, blocked) {
     const rows = Array.from({length: height + 1}, () => []);
     for (let y = 0; y <= height; y += 1) {
       for (let x = 0; x <= width; x += 1) {
-        const topLeft = core.isWall(tiles, x - 1, y - 1, width);
-        const topRight = core.isWall(tiles, x, y - 1, width);
-        const bottomLeft = core.isWall(tiles, x - 1, y, width);
-        const bottomRight = core.isWall(tiles, x, y, width);
+        const topLeft = blocked(tiles, x - 1, y - 1, width);
+        const topRight = blocked(tiles, x, y - 1, width);
+        const bottomLeft = blocked(tiles, x - 1, y, width);
+        const bottomRight = blocked(tiles, x, y, width);
         if (topLeft === topRight && bottomLeft === bottomRight) continue;
         if (topLeft === bottomLeft && topRight === bottomRight) continue;
         rows[y].push(x);
@@ -195,13 +209,13 @@
       angles.push(light.halfAngle * (2 * index / samples - 1));
     }
 
-    const { range } = light;
-    const corners = sceneLayer.corners;
+    const { range, blocked = core.isWall } = light;
+    const corners = blocked === core.isSolid ? sceneLayer.solidCorners : sceneLayer.wallCorners;
     const minY = Math.max(0, Math.ceil(actor.y - range));
     const maxY = Math.min(corners.length - 1, Math.floor(actor.y + range));
     const heading = Math.atan2(Math.sin(actor.angle), Math.cos(actor.angle));
 
-    // Include both sides of wall corners so the edge of a shadow stays sharp.
+    // Include both sides of obstacle corners so the edge of a shadow stays sharp.
     for (let y = minY; y <= maxY; y += 1) {
       for (const x of corners[y]) {
         const dx = x - actor.x;
@@ -222,7 +236,7 @@
       const angle = actor.angle + relative;
       const dx = Math.cos(angle);
       const dy = Math.sin(angle);
-      const distance = core.castRay(tiles, actor.x, actor.y, dx, dy, range, core.isWall, width);
+      const distance = core.castRay(tiles, actor.x, actor.y, dx, dy, range, blocked, width);
       const x = actor.x + dx * distance;
       const y = actor.y + dy * distance;
       if (fullCircle && index === 0) path.moveTo(x, y);
@@ -379,7 +393,11 @@
     target.scale(tilePixels, tilePixels);
     drawFloor(target, floor);
     for (const object of floor.furniture) drawFurniture(target, object);
-    return { floor, layer, tilePixels, corners: wallCorners(floor) };
+    return {
+      floor, layer, tilePixels,
+      wallCorners: obstacleCorners(floor, core.isWall),
+      solidCorners: obstacleCorners(floor, core.isSolid),
+    };
   }
 
   function drawSceneLayer(player) {
@@ -409,7 +427,7 @@
 
   function drawRoomLabels(floor, player) {
     const range = core.PLAYER_LIGHT.range + 1;
-    context.font = '700 0.21px "Malgun Gothic", sans-serif';
+    context.font = `700 0.25px ${GAME_FONT}`;
     context.textAlign = 'center';
     context.textBaseline = 'middle';
     context.fillStyle = '#c9ccae';
@@ -419,16 +437,24 @@
       const x = (first.x + last.x) / 2;
       const y = (first.y + last.y) / 2;
       if (Math.abs(x - player.x) > range || Math.abs(y - player.y) > range) continue;
-      const label = room.lounge ? '휴게실' : `${floor.number * 100 + room.number}호`;
+      let label = `${floor.number * 100 + room.number}호`;
+      if (room.lounge) label = '휴게실';
+      else if (floor.number === 5 && room.tile === floor.spawnTile) label = '내 방';
       context.fillText(label, x, y);
     }
   }
 
-  function drawGoal(floor) {
-    const { x, y } = core.tileCenter(floor.goalTile, floor.width);
-    const exit = floor.number === 1;
-    const accent = exit ? '#a9e6b9' : '#f3d991';
-    context.fillStyle = exit ? '#233e31' : '#423c28';
+  function drawStairSign(floor, player, playerBeam, tile, kind) {
+    if (tile === null) return;
+    const marker = core.tileCenter(tile, floor.width);
+    const { x, y } = marker;
+    if (Math.hypot(x - player.x, y - player.y) > core.PLAYER_LIGHT.range + 1.5) return;
+    const exit = kind === 'exit';
+    const up = kind === 'up';
+    const accent = exit ? '#a9e6b9' : up ? '#a5ddec' : '#f3d991';
+    context.save();
+    if (!core.seesTarget(floor.tiles, player, marker, NEARBY_STAIR_SIGHT, floor.width)) context.clip(playerBeam);
+    context.fillStyle = exit ? '#233e31' : up ? '#203946' : '#423c28';
     context.fillRect(x - 0.43, y - 1.45, 0.86, 2.9);
     context.strokeStyle = accent;
     context.lineWidth = 0.025;
@@ -439,23 +465,24 @@
       context.moveTo(x + 0.06, y - 0.02);
       context.lineTo(x + 0.12, y - 0.02);
     } else {
-      context.moveTo(x - 0.22, y - 0.2);
-      context.lineTo(x - 0.09, y - 0.2);
-      context.lineTo(x - 0.09, y - 0.07);
-      context.lineTo(x + 0.04, y - 0.07);
-      context.lineTo(x + 0.04, y + 0.06);
-      context.lineTo(x + 0.17, y + 0.06);
-      context.lineTo(x + 0.17, y + 0.18);
+      const tip = y + (up ? -0.32 : 0.25);
+      const shoulder = tip + (up ? 0.19 : -0.19);
+      context.moveTo(x, y + (up ? 0.25 : -0.32));
+      context.lineTo(x, tip);
+      context.moveTo(x - 0.2, shoulder);
+      context.lineTo(x, tip);
+      context.lineTo(x + 0.2, shoulder);
     }
     context.lineWidth = 0.05;
     context.lineCap = 'round';
     context.lineJoin = 'round';
     context.stroke();
     context.fillStyle = accent;
-    context.font = '700 0.25px "Malgun Gothic", sans-serif';
+    context.font = `700 0.32px ${GAME_FONT}`;
     context.textAlign = 'center';
     context.textBaseline = 'middle';
-    context.fillText(exit ? '출구' : '계단', x, y + 0.64);
+    context.fillText(exit ? '출구' : up ? '위층' : '아래층', x, y + 0.61, 0.73);
+    context.restore();
   }
 
   function drawActor(actor, radius, fill, outline, lamp) {
@@ -642,14 +669,14 @@
     light.addColorStop(1, '#070b0b95');
     context.fillStyle = light;
     context.fill(playerBeam);
-    drawGoal(floor);
-
     drawGuardLamps(lamps);
     for (const { guard } of lamps) {
       if (guard.mode === 'patrol') drawActor(guard, core.GUARD_RADIUS, '#664440', '#e39883', '#ffcb8a');
     }
     context.restore();
 
+    drawStairSign(floor, player, playerBeam, floor.goalTile, floor.number === 1 ? 'exit' : 'down');
+    drawStairSign(floor, player, playerBeam, floor.upTile, 'up');
     drawActor(player, core.PLAYER_RADIUS, '#a6c3ac', '#d0e4c8', '#fff0b7');
     context.restore();
     if (!intro) drawTrackedGuards(guards, player, scale);
@@ -684,6 +711,7 @@
       accumulator -= STEP;
       if (game.phase !== 'playing' || game.floor !== floor) {
         const kind = game.phase === 'playing' ? 'floor' : game.phase;
+        if (kind === 'escaped') finishedAt = time;
         beginTransition(kind, time);
         audio.play(kind);
         break;
@@ -727,6 +755,7 @@
     }
     if (!movementKeys.has(event.code)) return;
     event.preventDefault();
+    if (transition || event.repeat) return;
     keys.add(event.code);
   });
 
@@ -748,5 +777,6 @@
     applySoundPreference();
   });
   resize();
+  document.fonts.load('20px LeeSeoyun').then(() => { dirty = true; }, () => {});
   requestAnimationFrame(frame);
 })();
