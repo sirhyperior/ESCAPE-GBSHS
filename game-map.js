@@ -188,10 +188,10 @@
     return true;
   }
 
-  function createRooms(layout, depth, random) {
+  function createRooms(layout, depth, random, dense) {
     const { tiles, roomsByTile, doorways, width: mapWidth } = layout;
     const rooms = [];
-    const count = choose([7, 8, 8, 9, 10], random) + depth + Math.max(0, depth - 1);
+    const count = choose([7, 8, 8, 9, 10], random) + depth + Math.max(0, depth - 1) + (dense ? 3 : 0);
     const hasLounge = random() < LOUNGE_CHANCE;
     for (const entry of roomEntrances(layout, random)) {
       const { x, y, outX, outY, hall, wall } = entry;
@@ -296,28 +296,47 @@
     return objects;
   }
 
-  function createLayout(random, kind = choose(LAYOUTS, random), depth = 0) {
+  function createLayout(random, kind = choose(LAYOUTS, random), depth = 0, dense = false) {
     const extra = Math.max(0, depth - 1);
-    const width = WIDTH + 4 * (depth + extra);
-    const height = HEIGHT + 2 * (depth + extra);
+    const growth = depth + extra + (dense ? 4 : 0);
+    const width = WIDTH + 4 * growth;
+    const height = HEIGHT + 2 * growth;
     const tiles = new Uint8Array(width * height).fill(WALL);
     const roomsByTile = new Int8Array(tiles.length).fill(-1);
     const doorways = new Uint8Array(tiles.length);
     const reflectX = random() < 0.5;
     const reflectY = random() < 0.5;
     const plan = corridorPlan(kind, random, width, height);
-    addCrossPassages(plan, extra, random);
+    addCrossPassages(plan, extra + (dense ? 2 : 0), random);
     const centerlines = plan.map(points => points.map(([x, y]) => [
       reflectX ? width - 1 - x : x,
       reflectY ? height - 1 - y : y,
     ]));
     const routes = centerlines.map((points, index) => carveCorridor(tiles, points, index === 0 ? 3 : 2, width));
     const layout = { kind, width, height, tiles, roomsByTile, doorways, routes };
-    const rooms = createRooms(layout, depth, random);
+    const rooms = createRooms(layout, depth, random, dense);
     const sorted = rooms.slice().sort((a, b) => a.top - b.top || a.left - b.left);
     sorted.forEach((room, index) => { room.number = index + 1; });
     const furniture = rooms.flatMap(room => furnishRoom(layout, room, random));
     return { ...layout, rooms, furniture };
+  }
+
+  function createPassage(number) {
+    const width = 25;
+    const height = 11;
+    const tiles = new Uint8Array(width * height).fill(WALL);
+    const route = carveCorridor(tiles, [[2, 7], [9, 7], [9, 4], [22, 4]], 1, width);
+    return {
+      kind: 'passage', number, width, height, tiles,
+      spawnTile: route[0], goalTile: route.at(-1), upTile: null,
+      roomsByTile: new Int8Array(tiles.length).fill(-1), doorways: new Uint8Array(tiles.length),
+      rooms: [], furniture: [], guards: [], cameras: [], pickups: [],
+      crumbs: new Map(), empUntil: 0,
+    };
+  }
+
+  function isStudyDesk(x, y) {
+    return (x % 3 + 3) % 3 === 1 && (y % 3 + 3) % 3 === 1;
   }
 
   function cameraMounts({tiles, roomsByTile, doorways, width, height}) {
@@ -371,7 +390,7 @@
 
   const map = {
     WIDTH, HEIGHT, WALL, FURNITURE, LAYOUTS, randomSource, choose, shuffle, tileAt, tileCenter,
-    isWall, isSolid, walkableTiles, createLayout, placeRoomItems, cameraMounts,
+    isWall, isSolid, walkableTiles, createLayout, placeRoomItems, cameraMounts, createPassage, isStudyDesk,
   };
   if (typeof module === 'object' && module.exports) module.exports = map;
   else root.DormMap = map;

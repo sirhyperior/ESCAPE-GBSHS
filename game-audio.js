@@ -5,6 +5,9 @@
   const AudioContext = root.AudioContext || root.webkitAudioContext;
 
   function create() {
+    const scare = new Audio('full-golden-freddy-scream.mp3');
+    scare.preload = 'auto';
+    scare.volume = MASTER_GAIN;
     let context;
     let output;
     let noise;
@@ -36,6 +39,7 @@
 
     function setEnabled(value) {
       enabled = Boolean(value);
+      if (!enabled) stopScare();
       stride = 0.25;
       breath = 0.45;
       pulse = 1;
@@ -45,6 +49,11 @@
       output.gain.cancelScheduledValues(now);
       output.gain.setTargetAtTime(enabled ? MASTER_GAIN : 0, now, 0.012);
       if (enabled && context.state !== 'running') void unlock();
+    }
+
+    function stopScare() {
+      scare.pause();
+      scare.currentTime = 0;
     }
 
     function ready() {
@@ -139,6 +148,13 @@
     }
 
     function play(event) {
+      if (event === 'scared') {
+        if (enabled) {
+          scare.currentTime = 0;
+          void scare.play().catch(() => {});
+        }
+        return;
+      }
       if (!ready()) return;
       const now = context.currentTime + 0.006;
       if (event === 'floor') {
@@ -159,7 +175,7 @@
       tone(context.currentTime + 0.006, 0.036, 0.025, pitch, pitch * 0.9, 'square');
     }
 
-    return { unlock, setEnabled, update, play, playDialogue };
+    return { unlock, setEnabled, update, play, playDialogue, stopScare };
   }
 
   root.DormAudio = { create };

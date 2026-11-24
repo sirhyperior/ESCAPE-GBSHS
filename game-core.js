@@ -5,7 +5,7 @@
   const items = typeof module === 'object' && module.exports ? require('./game-items.js') : root.DormItems;
   const {
     WIDTH, HEIGHT, WALL, LAYOUTS, randomSource, choose, shuffle, tileAt, tileCenter,
-    isWall, isSolid, walkableTiles, createLayout, placeRoomItems, cameraMounts,
+    isWall, isSolid, walkableTiles, createLayout, placeRoomItems, cameraMounts, createPassage, isStudyDesk,
   } = map;
   const MIN_ROUTE = 26;
   const MIN_GUARD_DISTANCE = 12;
@@ -30,7 +30,9 @@
   const RECOVERY_DELAY = 0.75;
   const SEARCH_TIME = 2.5;
   const EPSILON = 1e-9;
-  const ITEM_IDS = Object.keys(items);
+  const ITEM_IDS = Object.keys(items).filter(id => id !== 'phone');
+  const PHONE_SPAWN_CHANCE = 0.14;
+  const PHONE_BATTERY_LINE = '앗... 방전됐다';
   const ITEM_REACH = { range: 1.25, halfAngle: Math.PI, blocked: isSolid };
   const CRUMB_SPACING = 0.75;
   const SHOT_DURATION = 0.38;
@@ -70,12 +72,12 @@
   }
 
   function placeCameras(floor, random) {
-    const count = CAMERA_COUNTS[floor.number];
+    const count = CAMERA_COUNTS[floor.number] + (floor.area === 'girls' ? 4 : 0);
     if (!count) return [];
-    const { tiles, width, spawnTile, upTile, goalTile, goalTiles } = floor;
-    const stairs = [upTile, goalTile].map(tile => tileCenter(tile, width));
+    const { tiles, width, spawnTile, transferTile, upTile, goalTile } = floor;
+    const stairs = [upTile, goalTile].filter(tile => tile !== null).map(tile => tileCenter(tile, width));
     const open = tiles.slice();
-    open[upTile] = WALL;
+    if (upTile !== null) open[upTile] = WALL;
     const cameras = [];
     for (const mount of shuffle(cameraMounts(floor), random)) {
       if (stairs.some(stair => Math.hypot(mount.x - stair.x, mount.y - stair.y) < 6)) continue;
@@ -83,8 +85,8 @@
 
       const swept = cameraSweepTiles(floor, mount).filter(tile => open[tile] === 0);
       for (const tile of swept) open[tile] = WALL;
-      const { distance } = walkableTiles(open, spawnTile, -1, width);
-      if (goalTiles.some(tile => distance[tile] >= 0)) {
+      const { distance } = walkableTiles(open, goalTile, -1, width);
+      if (distance[spawnTile] >= 0 && (transferTile === null || distance[transferTile] >= 0)) {
         cameras.push({ ...mount, phase: random() * 2 * Math.PI });
         if (cameras.length === count) break;
       } else {
@@ -135,9 +137,10 @@
     return lookouts;
   }
 
-  function createFloor(number, seed, kind) {
+  function createFloor(number, seed, kind, area = 'boys') {
     const random = randomSource(seed);
-    const layout = createLayout(random, kind, 5 - number);
+    const girls = area === 'girls';
+    const layout = createLayout(random, kind, 5 - number, girls);
     const { tiles, rooms, routes, width } = layout;
     const [main] = routes;
     const bedrooms = rooms.filter(room => !room.lounge);
@@ -159,28 +162,33 @@
     const goalTiles = [goalTile - width, goalTile, goalTile + width];
     const upTile = number === 5 ? null : entry.tile;
     const spawnTile = upTile === null ? bedroomTile : stairLanding(main, upTile);
-    const homeRoomId = number === 5 ? layout.roomsByTile[spawnTile] : null;
+    const homeRoomId = !girls && number === 5 ? layout.roomsByTile[spawnTile] : null;
+    const transferTile = girls ? choose(bedrooms, random).tile : null;
     const patrolLinks = corridorLinks(routes, upTile === null ? [goalTile] : [goalTile, upTile], width);
     const lookouts = doorwayLookouts(rooms, patrolLinks);
     const difficulty = Math.max(0, 4 - number);
     const patrolSpeed = PATROL_SPEED + 0.1 * difficulty;
     const chaseSpeed = CHASE_SPEED + 0.15 * difficulty;
     const floor = {
-      ...layout, number, spawnTile, homeRoomId, goalTile, goalTiles, upTile,
+      ...layout, area, number, spawnTile, transferTile, homeRoomId, goalTile, goalTiles, upTile,
       patrolLinks, lookouts, random, guards: [], patrolSpeed, chaseSpeed,
       pickups: placeRoomItems(layout, homeRoomId, ITEM_IDS, randomSource(seed ^ 0xd174dc39)),
       crumbs: new Map(),
       empUntil: 0,
     };
+    if (!girls && number >= 4) placePhone(floor, randomSource(seed ^ 0xab87db63));
     floor.cameras = placeCameras(floor, randomSource(seed ^ 0x62a3fb71));
 
     const distance = walkableTiles(tiles, spawnTile, -1, width).distance;
+    const transferDistance = girls ? walkableTiles(tiles, transferTile, -1, width).distance : null;
     const exit = tileCenter(goalTile, width);
     let candidates = [...patrolLinks.keys()].filter(tile => {
       const point = tileCenter(tile, width);
-      return distance[tile] >= MIN_GUARD_DISTANCE && Math.hypot(point.x - exit.x, point.y - exit.y) >= 4;
+      return distance[tile] >= MIN_GUARD_DISTANCE && (!transferDistance || transferDistance[tile] >= 9) &&
+        Math.hypot(point.x - exit.x, point.y - exit.y) >= 4;
     });
-    for (let index = 0; index < GUARD_COUNTS[number]; index += 1) {
+    const guardCount = GUARD_COUNTS[number] + (girls ? 3 : 0);
+    for (let index = 0; index < guardCount; index += 1) {
       const separation = tile => {
         const point = tileCenter(tile, width);
         return Math.min(...floor.guards.map(guard => Math.hypot(guard.x - point.x, guard.y - point.y)));
@@ -214,6 +222,18 @@
     return floor;
   }
 
+  function placePhone(floor, random) {
+    if (random() >= PHONE_SPAWN_CHANCE) return;
+    const occupied = new Set(floor.pickups.map(item => floor.roomsByTile[tileAt(item.x, item.y, floor.width)]));
+    const rooms = floor.rooms.filter(room => !room.lounge && room.id !== floor.homeRoomId);
+    const empty = rooms.filter(room => !occupied.has(room.id));
+    const room = choose(empty.length ? empty : rooms, random);
+    if (!empty.length) floor.pickups = floor.pickups.filter(item => (
+      floor.roomsByTile[tileAt(item.x, item.y, floor.width)] !== room.id
+    ));
+    floor.pickups.push({ id: 'phone', ...tileCenter(room.tile, floor.width) });
+  }
+
   function openLanding(floor, stair) {
     const { width, routes: [main], guards } = floor;
     const landing = stairLanding(main, stair);
@@ -226,27 +246,32 @@
     }) ?? landing;
   }
 
-  function enterFloor(game, number) {
+  function enterFloor(game, number, arrivingFromPassage = false) {
     let floor = game.floors.get(number);
     if (!floor) {
       const kind = game.layoutOrder[(5 - number) % game.layoutOrder.length];
-      floor = createFloor(number, Math.floor(game.random() * 4294967296), kind);
+      floor = createFloor(number, Math.floor(game.random() * 4294967296), kind, game.area);
       game.floors.set(number, floor);
     }
+    placeSecretDoor(game, floor);
     const { width, spawnTile, goalTile, upTile } = floor;
-    let arrival = spawnTile;
+    let arrival = arrivingFromPassage ? floor.transferTile : spawnTile;
     let angle;
-    if (game.floor) {
+    if (game.floor && !arrivingFromPassage) {
       const stair = game.floor.number < number ? goalTile : upTile;
       arrival = openLanding(floor, stair);
       angle = stairLanding(floor.routes[0], stair) > stair ? 0 : Math.PI;
     } else {
-      const { previous } = walkableTiles(floor.tiles, goalTile, spawnTile, width);
-      const from = tileCenter(spawnTile, width);
-      const next = tileCenter(previous[spawnTile], width);
+      const { previous } = walkableTiles(floor.tiles, goalTile, arrival, width);
+      const from = tileCenter(arrival, width);
+      const next = tileCenter(previous[arrival], width);
       angle = Math.atan2(next.y - from.y, next.x - from.x);
     }
-    Object.assign(game.player, tileCenter(arrival, width), { angle });
+    setFloor(game, floor, tileCenter(arrival, width), angle);
+  }
+
+  function setFloor(game, floor, position, angle) {
+    Object.assign(game.player, position, { angle });
     game.floor = floor;
     game.crumbDistance = 0;
     game.dismissedPickup = null;
@@ -260,8 +285,14 @@
     const game = {
       random,
       itemRandom: randomSource(seed ^ 0xe43aef29),
+      secretRandom: randomSource(seed ^ 0x763d16a7),
       layoutOrder: shuffle(LAYOUTS.slice(), random),
       floors: new Map(),
+      area: 'boys',
+      secrets: new Map(),
+      phoneCall: null,
+      keypadOpen: false,
+      study: null,
       phase: 'playing',
       time: 0,
       player: {
@@ -376,10 +407,10 @@
     return nearest;
   }
 
-  function canStand({tiles, width}, x, y, radius) {
+  function canStand({tiles, width, kind}, x, y, radius) {
     for (let row = Math.floor(y - radius); row <= Math.floor(y + radius); row += 1) {
       for (let column = Math.floor(x - radius); column <= Math.floor(x + radius); column += 1) {
-        if (!isSolid(tiles, column, row, width)) continue;
+        if (!(kind === 'study' ? isStudyDesk(column, row) : isSolid(tiles, column, row, width))) continue;
         const dx = x - Math.max(column, Math.min(column + 1, x));
         const dy = y - Math.max(row, Math.min(row + 1, y));
         if (dx * dx + dy * dy < radius * radius) return false;
@@ -412,10 +443,13 @@
     const before = maxStamina(game);
     const previous = inventory[type];
     inventory[type] = { id, floorNumber: floor.number, pickedUpAt: game.time };
+    if (id === 'phone') inventory[type].foundFloor = item.foundFloor ?? floor.number;
     player.stamina *= maxStamina(game) / before;
     const index = floor.pickups.indexOf(item);
-    if (previous) floor.pickups[index] = { id: previous.id, x, y };
-    else floor.pickups.splice(index, 1);
+    if (previous) {
+      floor.pickups[index] = { id: previous.id, x, y };
+      if (previous.id === 'phone') floor.pickups[index].foundFloor = previous.foundFloor;
+    } else floor.pickups.splice(index, 1);
     if (type === 'passive') game.crumbDistance = 0;
     else game.useHintUntil = 0;
     game.dismissedPickup = item;
@@ -423,7 +457,7 @@
 
   function hasItemRoute(game) {
     const { passive } = game.inventory;
-    return passive?.id === 'aiGlasses' && passive.floorNumber === game.floor.number;
+    return game.area !== 'passage' && passive?.id === 'aiGlasses' && passive.floorNumber === game.floor.number;
   }
 
   function heldItem(game) {
@@ -490,7 +524,7 @@
     const distance = Math.hypot(player.x - startX, player.y - startY);
     if (distance > EPSILON) {
       player.angle = Math.atan2(player.y - startY, player.x - startX);
-      if (game.inventory.passive?.id === 'bread') leaveCrumbs(game, startX, startY, distance);
+      if (game.inventory.passive?.id === 'bread' && floor.rooms.length) leaveCrumbs(game, startX, startY, distance);
     }
 
     player.sprinting = distance > EPSILON && sprintTime > 0;
@@ -516,6 +550,7 @@
       player.recovering = player.stamina > previous + EPSILON;
       if (player.recovering && player.stamina === maximum) player.staminaRestoredAt = game.time;
     }
+    return distance;
   }
 
   function canApproach(floor, guard, x, y) {
@@ -592,12 +627,106 @@
     });
   }
 
+  function beginPhoneCall(game) {
+    const { floor, inventory } = game;
+    const foundHere = game.area === 'boys' && floor.number >= 4 &&
+      (inventory.active.foundFloor ?? inventory.active.floorNumber) === floor.number;
+    const code = foundHere ? Array.from({length: 4}, () => Math.floor(game.secretRandom() * 10)).join('') : null;
+    game.phoneCall = {
+      code, targetFloor: floor.number - 1, spent: false,
+      lines: code === null ? [PHONE_BATTERY_LINE] : [[...code].join('... '), PHONE_BATTERY_LINE],
+    };
+  }
+
+  function placeSecretDoor(game, floor) {
+    const secret = game.secrets.get(floor.number);
+    if (!secret || floor.secret || floor.area !== 'boys') return;
+    const occupied = new Set(floor.pickups.map(item => tileAt(item.x, item.y, floor.width)));
+    const rooms = floor.rooms.filter(room => !occupied.has(room.tile));
+    const room = choose(rooms.length ? rooms : floor.rooms, randomSource(secret.seed));
+    floor.secret = { ...tileCenter(room.tile, floor.width), code: secret.code };
+  }
+
+  function revealPhoneLine(game, index) {
+    const call = game.phoneCall;
+    if (!call || call.spent || index !== call.lines.length - 1) return;
+    call.spent = true;
+    game.inventory.active = null;
+    showItemEffect(game, 'phone', { key: 'spent' });
+    if (call.code !== null && !game.secrets.has(call.targetFloor)) {
+      game.secrets.set(call.targetFloor, { code: call.code, seed: Math.floor(game.secretRandom() * 4294967296) });
+      const visited = game.floors.get(call.targetFloor);
+      if (visited) placeSecretDoor(game, visited);
+    }
+  }
+
+  function nearbySecret(game) {
+    return game.area === 'boys' && game.floor.secret && itemInReach(game, game.floor.secret);
+  }
+
+  function openSecretPassage(game, code) {
+    if (!game.keypadOpen || !nearbySecret(game) || game.floor.secret.code !== code) return false;
+    game.keypadOpen = false;
+    clearAlert(game.floor);
+    game.area = 'passage';
+    const passage = createPassage(game.floor.number);
+    setFloor(game, passage, tileCenter(passage.spawnTile, passage.width), 0);
+    return true;
+  }
+
+  function leavePassage(game) {
+    const { player } = game;
+    const number = game.floor.number;
+    player.stamina *= MAX_STAMINA / maxStamina(game);
+    game.inventory.passive = game.inventory.active = null;
+    game.itemEffects.clear();
+    game.useHintUntil = 0;
+    player.speedBoostUntil = player.freeSprintUntil = 0;
+    player.speedBoosted = false;
+    game.floors.clear();
+    game.secrets.clear();
+
+    if (game.secretRandom() < 0.8) {
+      game.area = 'girls';
+      enterFloor(game, number, true);
+    } else {
+      game.area = 'study';
+      game.study = {
+        distance: 0, flickerDistance: 10 + game.secretRandom() * 4,
+        scareAt: null, changeAt: null, dimmed: false,
+      };
+      const study = { kind: 'study', number, guards: [], cameras: [], rooms: [], pickups: [] };
+      setFloor(game, study, { x: 0.5, y: 0.5 }, 0);
+    }
+  }
+
+  function updateStudy(game, distance) {
+    const { study, time, secretRandom } = game;
+    study.distance += distance;
+    if (study.scareAt === null && study.distance >= study.flickerDistance) {
+      study.scareAt = time + 3 + secretRandom() * 2;
+      study.changeAt = time;
+    }
+    if (study.scareAt === null) return;
+    if (time >= study.scareAt) {
+      game.phase = 'scared';
+      return;
+    }
+    if (time >= study.changeAt) {
+      study.dimmed = !study.dimmed;
+      study.changeAt = time + (study.dimmed ? 0.15 + secretRandom() * 0.16 : 0.32 + secretRandom() * 0.55);
+    }
+  }
+
   function useItem(game) {
     const { inventory, floor, player, time } = game;
     if (!inventory.active) return;
     const { id } = inventory.active;
     let feedback;
     switch (id) {
+      case 'phone':
+        beginPhoneCall(game);
+        return;
       case 'monster':
         if (player.stamina < maxStamina(game)) player.staminaRestoredAt = time;
         player.stamina = maxStamina(game);
@@ -790,21 +919,31 @@
   }
 
   function step(game, input, dt) {
-    if (game.phase !== 'playing') return;
+    if (game.phase !== 'playing' || game.phoneCall || game.keypadOpen) return;
     game.time += dt;
     for (const [key, effect] of game.itemEffects) {
       if (!effectActive(effect.until, game.time)) game.itemEffects.delete(key);
     }
     if (game.dismissedPickup && !itemInReach(game, game.dismissedPickup)) game.dismissedPickup = null;
-    if (input.interact) {
+    if (input.interact && (game.area === 'boys' || game.area === 'girls')) {
       const item = nearbyItem(game);
       if (item) pickupItem(game, item);
+      else if (nearbySecret(game)) game.keypadOpen = true;
       else useItem(game);
+      if (game.phoneCall || game.keypadOpen) return;
     }
-    updatePlayer(game, input, dt);
+    const distance = updatePlayer(game, input, dt);
+    if (game.area === 'study') {
+      updateStudy(game, distance);
+      return;
+    }
     const { player, floor, time } = game;
 
     const tile = tileAt(player.x, player.y, floor.width);
+    if (game.area === 'passage') {
+      if (tile === floor.goalTile) leavePassage(game);
+      return;
+    }
     const goingUp = tile === floor.upTile;
     if (goingUp || floor.goalTiles.includes(tile)) {
       if (!goingUp && game.inventory.passive?.id === 'aiGlasses') {
@@ -836,6 +975,7 @@
   const core = {
     WIDTH, HEIGHT, PLAYER_RADIUS, GUARD_RADIUS, MAX_STAMINA, PLAYER_LIGHT, SHOT_DURATION, CAMERA_SCAN,
     createFloor, createGame, step, guardLight, playerLight, maxStamina, nearbyItem, hasItemRoute, itemRoute, heldItem,
+    nearbySecret, revealPhoneLine, openSecretPassage, isStudyDesk,
     cameraAngle, cameraSeesPlayer, cameraSweepTiles,
     isWall, isSolid, tileAt, tileCenter, walkableTiles, castRay, seesTarget,
   };

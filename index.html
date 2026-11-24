@@ -11,6 +11,7 @@
     <script src="game-core.js" defer></script>
     <script src="game-audio.js" defer></script>
     <script src="game-dialogue.js" defer></script>
+    <script src="game-horror.js" defer></script>
     <script src="game.js" defer></script>
   </head>
   <body>
@@ -19,8 +20,16 @@
 
       <div class="hud" id="hud" hidden>
         <div class="floor-panel">
-          <div class="floor-number"><span id="floor">5</span><span class="floor-unit">층</span></div>
+          <span class="area-name" id="area-name" hidden></span>
+          <div class="floor-number"><span id="floor">5</span><span class="floor-unit" id="floor-unit">층</span></div>
           <span class="objective" id="objective">아래층 계단 찾기</span>
+        </div>
+
+        <div class="item-card secret-prompt" id="secret-prompt" role="status" hidden>
+          <div class="dialogue-bubble">
+            <p class="item-name">비밀 통로</p>
+            <div class="dialogue-controls"><kbd>Space</kbd><span>키패드 열기</span></div>
+          </div>
         </div>
 
         <div class="stamina-panel">
@@ -78,6 +87,32 @@
           <p class="dialogue-readable" role="status"></p>
           <div class="dialogue-controls"><kbd>Space</kbd><span class="dialogue-action"></span></div>
         </div>
+      </div>
+
+      <dialog class="keypad" id="keypad" aria-labelledby="keypad-title" aria-describedby="keypad-help">
+        <h2 id="keypad-title">비밀 통로</h2>
+        <p id="keypad-help">숫자 네 자리를 입력하세요.</p>
+        <output id="keypad-digits" aria-label="입력한 비밀번호">· · · ·</output>
+        <div class="keypad-buttons">
+          <button type="button" data-digit="1">1</button>
+          <button type="button" data-digit="2">2</button>
+          <button type="button" data-digit="3">3</button>
+          <button type="button" data-digit="4">4</button>
+          <button type="button" data-digit="5">5</button>
+          <button type="button" data-digit="6">6</button>
+          <button type="button" data-digit="7">7</button>
+          <button type="button" data-digit="8">8</button>
+          <button type="button" data-digit="9">9</button>
+          <button type="button" data-keypad="clear">지우기</button>
+          <button type="button" data-digit="0">0</button>
+          <button type="button" data-keypad="back" aria-label="마지막 숫자 지우기">⌫</button>
+        </div>
+        <p class="keypad-message" id="keypad-message" role="status"></p>
+        <button class="keypad-close" id="keypad-close" type="button">닫기</button>
+      </dialog>
+
+      <div class="scare-screen" id="scare-screen" hidden>
+        <img src="jeff-the-killer.png" alt="제프 더 킬러">
       </div>
 
       <section class="screen" id="screen" aria-labelledby="screen-title" data-screen="start">

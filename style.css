@@ -88,6 +88,15 @@ body {
   font-weight: 700;
 }
 
+.area-name {
+  color: var(--gold);
+  font-size: 14px;
+}
+
+.floor-number[data-location] {
+  font-size: clamp(24px, 4vw, 46px);
+}
+
 .stamina-panel {
   --stamina-fill: #f5d994;
   --stamina-track: #3a352b;
@@ -427,6 +436,73 @@ body {
 }
 
 .item-card .dialogue-controls { margin-top: 5px; font-size: 14px; }
+
+.secret-prompt { width: min(220px, calc(100% - 36px)); }
+
+.keypad {
+  width: min(310px, calc(100% - 32px));
+  margin: auto;
+  padding: 21px;
+  border: 2px solid #8faea2;
+  background: #18211e;
+  color: var(--paper);
+  box-shadow: 0 0 0 5px #0b100e, inset 0 0 0 2px #46554b, 10px 13px 0 #0007;
+  font: 16px/1.2 var(--pixel-font);
+}
+
+.keypad::backdrop { background: #060a08be; }
+
+.keypad h2 { margin: 0 0 7px; color: var(--gold); font: inherit; font-size: 23px; }
+.keypad p { margin: 0 0 14px; color: var(--muted); font-size: 14px; }
+
+.keypad output {
+  display: block;
+  margin-bottom: 12px;
+  padding: 8px;
+  border: 1px solid #405b51;
+  background: #0c1512;
+  color: #bdeab9;
+  text-align: center;
+  font-size: 29px;
+  letter-spacing: 0.08em;
+}
+
+.keypad-buttons {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.keypad button {
+  min-height: 40px;
+  margin: 0;
+  padding: 4px;
+  border: 1px solid #52685d;
+  border-radius: 0;
+  background: #263830;
+  color: var(--paper);
+  font: inherit;
+}
+
+.keypad button:hover, .keypad button:focus-visible { background: #3b5245; }
+.keypad .keypad-message { min-height: 1.2em; margin: 10px 0 3px; color: #ffb795; }
+.keypad .keypad-close { width: 100%; }
+
+.scare-screen {
+  position: fixed;
+  z-index: 4;
+  inset: 0;
+  overflow: hidden;
+  background: #000;
+}
+
+.scare-screen img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 90%;
+}
 
 @media (prefers-reduced-motion: reduce) {
   .hud::before { transition: none; }

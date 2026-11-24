@@ -103,6 +103,19 @@
         '.ocbbbbbco..', '..oooooooo..', '............', '............',
       ],
     },
+    phone: {
+      name: '핸드폰',
+      type: 'active',
+      consumable: true,
+      description: '누구 것인지 모를 핸드폰. 모르는 번호로 전화가 오고 있다... 받아볼까?',
+      feedback: { color: '#c5ead1', spent: '핸드폰 방전' },
+      palette: { o: '#20272b', s: '#8b9a9b', d: '#3a5557', l: '#addec6' },
+      pixels: [
+        '...oooooo...', '..osssssso..', '..osldddso..', '..osddldso..',
+        '..osdlddso..', '..osddldso..', '..osddddso..', '..osssssso..',
+        '..osododso..', '..osdodoso..', '..oooooooo..', '............',
+      ],
+    },
   };
 
   if (typeof module === 'object' && module.exports) module.exports = items;

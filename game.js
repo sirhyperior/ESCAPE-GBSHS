@@ -3,12 +3,15 @@
 
   const core = window.DormEscape;
   const items = window.DormItems;
+  const horror = window.DormHorror;
   const audio = window.DormAudio.create();
   const dialogue = window.DormDialogue.create(document.getElementById('dialogue'), audio.playDialogue);
   const canvas = document.getElementById('scene');
   const context = canvas.getContext('2d', { alpha: false });
   const hud = document.getElementById('hud');
   const floorNumber = document.getElementById('floor');
+  const floorUnit = document.getElementById('floor-unit');
+  const areaName = document.getElementById('area-name');
   const objective = document.getElementById('objective');
   const stamina = document.getElementById('stamina');
   const staminaPanel = stamina.parentElement;
@@ -20,6 +23,12 @@
   const itemName = itemCard.querySelector('.item-name');
   const itemDescription = itemCard.querySelector('.item-description');
   const itemPreview = itemCard.querySelector('canvas');
+  const secretPrompt = document.getElementById('secret-prompt');
+  const keypad = document.getElementById('keypad');
+  const keypadDigits = document.getElementById('keypad-digits');
+  const keypadMessage = document.getElementById('keypad-message');
+  const keypadClose = document.getElementById('keypad-close');
+  const scareScreen = document.getElementById('scare-screen');
   const inventorySlots = {
     passive: document.getElementById('passive-slot'),
     active: document.getElementById('active-slot'),
@@ -87,6 +96,7 @@
   let dirty = true;
   let sprintReleased = false;
   let interactPressed = false;
+  let enteredDigits = '';
   let soundEnabled = true;
   let nearbyPickup = null;
   const keys = new Set();
@@ -151,21 +161,27 @@
     });
   }
 
-  function showDialogue(lines) {
-    dialogue.open(lines);
+  function showDialogue(lines, onLine = null) {
+    dialogue.open(lines, onLine);
     if (!dialogue.active) return;
     clearKeys();
     hud.hidden = true;
     dirty = true;
   }
 
-  function beginTransition(kind, time, onComplete = null) {
+  function placeTitle() {
+    if (game.area === 'passage') return '비밀 통로';
+    if (game.area === 'study') return '???';
+    return `${game.floor.number}층`;
+  }
+
+  function beginTransition(kind, time, onComplete = null, name = placeTitle()) {
     transition = { kind, endsAt: time + EFFECT_MS[kind], onComplete };
     clearKeys();
     dirty = true;
     transitionOverlay.dataset.effect = kind;
     transitionOverlay.style.setProperty('--effect-duration', `${EFFECT_MS[kind]}ms`);
-    floorAnnouncement.textContent = kind === 'floor' ? `${game.floor.number}층` : '';
+    floorAnnouncement.textContent = kind === 'floor' ? name : '';
     floorAnnouncement.hidden = kind !== 'floor';
     transitionOverlay.hidden = false;
     if (kind !== 'floor') hud.hidden = true;
@@ -184,10 +200,15 @@
     hud.hidden = true;
     screen.dataset.screen = view;
     startControls.hidden = true;
-    screenTitle.textContent = view === 'escaped' ? '탈출 성공' : '붙잡혔습니다';
-    screenDescription.textContent = view === 'escaped'
-      ? '1층 출구를 통과했습니다.'
-      : `${game.floor.number}층에서 사감 선생님께 붙잡혔습니다.`;
+    if (view === 'scared') {
+      screenTitle.textContent = '???';
+      screenDescription.textContent = '어둠 속에서 무언가가 다가왔습니다.';
+    } else {
+      screenTitle.textContent = view === 'escaped' ? '탈출 성공' : '붙잡혔습니다';
+      screenDescription.textContent = view === 'escaped'
+        ? '1층 출구를 통과했습니다.'
+        : `${game.floor.number}층에서 사감 선생님께 붙잡혔습니다.`;
+    }
     escapeTime.textContent = view === 'escaped' ? `소요 시간 ${formatDuration(finishedAt - startedAt)}` : '';
     escapeTime.hidden = view !== 'escaped';
     startButton.textContent = '5층부터 다시 시작';
@@ -196,12 +217,76 @@
     dirty = true;
   }
 
-  function updateHud() {
-    const number = String(game.floor.number);
-    if (floorNumber.textContent !== number) {
-      floorNumber.textContent = number;
-      objective.textContent = number === '1' ? '1층 출구 찾기' : '아래층 계단 찾기';
+  function showScare() {
+    view = 'scared';
+    clearKeys();
+    hud.hidden = true;
+    scareScreen.hidden = false;
+    audio.play('scared');
+    let enteredFullscreen = false;
+    if (!document.fullscreenElement && document.fullscreenEnabled && navigator.userActivation?.isActive) {
+      document.documentElement.requestFullscreen().then(() => { enteredFullscreen = true; }, () => {});
     }
+    setTimeout(() => {
+      audio.stopScare();
+      window.close();
+      setTimeout(() => {
+        if (window.closed) return;
+        if (enteredFullscreen && document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+        scareScreen.hidden = true;
+        showResult();
+      }, 100);
+    }, 2000);
+  }
+
+  function renderKeypad(message = '') {
+    keypadDigits.textContent = [...enteredDigits.padEnd(4, '·')].join(' ');
+    keypadMessage.textContent = message;
+  }
+
+  function openKeypad() {
+    enteredDigits = '';
+    renderKeypad();
+    clearKeys();
+    secretPrompt.hidden = true;
+    keypad.showModal();
+  }
+
+  function closeKeypad() {
+    game.keypadOpen = false;
+    keypad.close();
+    clearKeys();
+    updateHud();
+  }
+
+  function enterDigit(digit) {
+    enteredDigits += digit;
+    if (enteredDigits.length < 4) {
+      renderKeypad();
+      return;
+    }
+    if (!core.openSecretPassage(game, enteredDigits)) {
+      enteredDigits = '';
+      renderKeypad('비밀번호가 맞지 않습니다.');
+      return;
+    }
+    keypad.close();
+    beginTransition('floor', performance.now());
+    updateHud();
+    audio.play('floor');
+  }
+
+  function updateHud() {
+    const special = game.area === 'study' || game.area === 'passage';
+    const name = special ? placeTitle() : String(game.floor.number);
+    if (floorNumber.textContent !== name) floorNumber.textContent = name;
+    floorNumber.parentElement.toggleAttribute('data-location', special);
+    floorUnit.hidden = special;
+    areaName.hidden = game.area !== 'girls';
+    if (!areaName.hidden && areaName.textContent !== '여자 기숙사') areaName.textContent = '여자 기숙사';
+    const goal = game.area === 'study' ? '' : game.area === 'passage' ? '나가는 문 찾기' :
+      game.floor.number === 1 ? '1층 출구 찾기' : '아래층 계단 찾기';
+    if (objective.textContent !== goal) objective.textContent = goal;
     const maximum = core.maxStamina(game);
     if (stamina.max !== maximum) stamina.max = maximum;
     if (stamina.value !== game.player.stamina) stamina.value = game.player.stamina;
@@ -311,6 +396,7 @@
     nearbyPickup = transition ? null : core.nearbyItem(game);
     const preview = game.dismissedPickup ? null : nearbyPickup;
     itemCard.hidden = !preview;
+    secretPrompt.hidden = Boolean(transition || nearbyPickup || game.keypadOpen || !core.nearbySecret(game));
     itemHint.hidden = Boolean(transition) || game.useHintUntil <= game.time;
     if (!preview) return;
     if (itemCard.dataset.item === preview.id) return;
@@ -620,6 +706,33 @@
     context.restore();
   }
 
+  function drawPassageDoor(floor, player, beam, marker, exit = false) {
+    const { x, y } = marker;
+    if (Math.hypot(x - player.x, y - player.y) > core.PLAYER_LIGHT.range + 1) return;
+    const accent = exit ? '#b5dcb6' : '#c7abdf';
+    context.save();
+    if (!core.seesTarget(floor.tiles, player, marker, NEARBY_STAIR_SIGHT, floor.width)) context.clip(beam);
+    context.fillStyle = '#111a18';
+    context.fillRect(x - 0.43, y - 0.46, 0.86, 0.92);
+    context.lineWidth = 0.035;
+    context.strokeStyle = accent;
+    context.strokeRect(x - 0.42, y - 0.45, 0.84, 0.9);
+    context.fillStyle = exit ? '#314d42' : '#3a3046';
+    context.fillRect(x - 0.28, y - 0.36, 0.56, 0.5);
+    context.fillStyle = accent;
+    context.fillRect(x + 0.13, y - 0.14, 0.07, 0.06);
+    if (!exit) {
+      context.fillRect(x + 0.31, y - 0.26, 0.055, 0.055);
+      context.fillRect(x + 0.31, y - 0.17, 0.055, 0.055);
+      context.fillRect(x + 0.31, y - 0.08, 0.055, 0.055);
+    }
+    context.font = `700 0.22px ${GAME_FONT}`;
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    context.fillText(exit ? '나가는 문' : '비밀 통로', x, y + 0.28, 0.75);
+    context.restore();
+  }
+
   function drawActor(actor, radius, fill, outline, lamp) {
     context.save();
     context.translate(actor.x, actor.y);
@@ -922,9 +1035,6 @@
     )) : floor.guards;
     const intro = view === 'start';
     const scale = Math.max(24, Math.min(68, width / 19, height / 12));
-    const layerLimit = Math.floor(Math.sqrt(LAYER_PIXEL_BUDGET / (floor.width * floor.height)));
-    const tilePixels = Math.min(LAYER_MAX_TILE_PIXELS, Math.ceil(scale * pixelRatio), layerLimit);
-    if (sceneLayer?.floor !== floor || sceneLayer.tilePixels !== tilePixels) sceneLayer = buildSceneLayer(floor, tilePixels);
     const focusX = intro ? width * 0.74 : width / 2;
     const focusY = intro ? height * 0.55 : height / 2;
 
@@ -934,6 +1044,18 @@
     context.save();
     context.translate(focusX - player.x * scale, focusY - player.y * scale);
     context.scale(scale, scale);
+
+    if (game.area === 'study') {
+      const brightness = reducedMotion.matches && game.study.scareAt !== null ? 0.56 : game.study.dimmed ? 0.22 : 1;
+      horror.drawStudy(context, player, core.PLAYER_LIGHT, brightness, core.isStudyDesk);
+      drawActor(player, core.PLAYER_RADIUS, '#a6c3ac', '#d0e4c8', '#fff0b7');
+      context.restore();
+      return;
+    }
+
+    const layerLimit = Math.floor(Math.sqrt(LAYER_PIXEL_BUDGET / (floor.width * floor.height)));
+    const tilePixels = Math.min(LAYER_MAX_TILE_PIXELS, Math.ceil(scale * pixelRatio), layerLimit);
+    if (sceneLayer?.floor !== floor || sceneLayer.tilePixels !== tilePixels) sceneLayer = buildSceneLayer(floor, tilePixels);
 
     if (intro) {
       context.globalAlpha = 0.18;
@@ -1007,9 +1129,14 @@
     }
     context.restore();
 
-    drawStairSign(floor, player, playerBeam, floor.goalTile, floor.number === 1 ? 'exit' : 'down');
-    drawStairSign(floor, player, playerBeam, floor.upTile, 'up');
-    drawItemRoute();
+    if (game.area === 'passage') {
+      drawPassageDoor(floor, player, playerBeam, core.tileCenter(floor.goalTile, floor.width), true);
+    } else {
+      drawStairSign(floor, player, playerBeam, floor.goalTile, floor.number === 1 ? 'exit' : 'down');
+      drawStairSign(floor, player, playerBeam, floor.upTile, 'up');
+      if (floor.secret) drawPassageDoor(floor, player, playerBeam, floor.secret);
+      drawItemRoute();
+    }
     drawCameras(cameras);
     if (nearbyPickup) drawGroundItem(nearbyPickup, true);
     if (!intro && !dialogue.active) drawPlayerEffects(player);
@@ -1036,20 +1163,34 @@
       dialogue.update(elapsed * 1000);
       return;
     }
+    if (keypad.open) return;
 
     accumulator += elapsed;
     dirty = true;
     if (accumulator < STEP) return;
     while (accumulator >= STEP) {
-      const { floor, player } = game;
+      const { area, floor, player } = game;
       const { x, y } = player;
       previousPose = { player: actorPose(player), guards: floor.guards.map(actorPose) };
       core.step(game, input(), STEP);
       accumulator -= STEP;
+      if (game.phoneCall) {
+        showDialogue(game.phoneCall.lines, index => core.revealPhoneLine(game, index));
+        break;
+      }
+      if (game.keypadOpen) {
+        openKeypad();
+        break;
+      }
+      if (game.phase === 'scared') {
+        showScare();
+        break;
+      }
       if (game.phase !== 'playing' || game.floor !== floor) {
         const kind = game.phase === 'playing' ? 'floor' : game.phase;
         if (kind === 'escaped') finishedAt = time;
-        beginTransition(kind, time);
+        const name = area === 'passage' && game.area === 'girls' ? `여자 기숙사 · ${placeTitle()}` : placeTitle();
+        beginTransition(kind, time, null, name);
         audio.play(kind);
         break;
       }
@@ -1075,6 +1216,17 @@
   }
 
   window.addEventListener('keydown', event => {
+    if (keypad.open) {
+      if (/^[0-9]$/.test(event.key)) {
+        event.preventDefault();
+        if (!event.repeat) enterDigit(event.key);
+      } else if (event.key === 'Backspace' || event.key === 'Delete') {
+        event.preventDefault();
+        enteredDigits = event.key === 'Backspace' ? enteredDigits.slice(0, -1) : '';
+        renderKeypad();
+      }
+      return;
+    }
     const interact = event.code === 'Space';
     if (interact && event.target === soundToggle) return;
     if (dialogue.active) {
@@ -1082,6 +1234,7 @@
       if (interact && !event.repeat) {
         dialogue.next();
         if (!dialogue.active) {
+          game.phoneCall = null;
           clearKeys();
           hud.hidden = false;
         }
@@ -1089,6 +1242,7 @@
       return;
     }
     if (view !== 'playing') {
+      if (!scareScreen.hidden) return;
       if (event.key === 'Enter' && !event.repeat && document.activeElement !== startButton && document.activeElement !== soundToggle) startGame();
       return;
     }
@@ -1109,6 +1263,19 @@
     applySoundPreference();
   });
   window.addEventListener('resize', resize);
+  keypad.addEventListener('click', event => {
+    const { digit, keypad: action } = event.target.dataset;
+    if (digit !== undefined) enterDigit(digit);
+    else if (action) {
+      enteredDigits = action === 'back' ? enteredDigits.slice(0, -1) : '';
+      renderKeypad();
+    }
+  });
+  keypad.addEventListener('cancel', event => {
+    event.preventDefault();
+    closeKeypad();
+  });
+  keypadClose.addEventListener('click', closeKeypad);
   startButton.addEventListener('click', startGame);
   soundToggle.addEventListener('click', event => {
     soundEnabled = !soundEnabled;

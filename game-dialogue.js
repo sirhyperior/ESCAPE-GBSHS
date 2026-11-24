@@ -15,6 +15,7 @@
     let characters = [];
     let visibleCount = 0;
     let elapsed = 0;
+    let onLine = null;
 
     function render() {
       revealed.textContent = characters.slice(0, visibleCount).join('');
@@ -29,11 +30,13 @@
       elapsed = 0;
       readable.textContent = text;
       render();
+      onLine?.(lineIndex);
     }
 
-    function open(sequence) {
+    function open(sequence, lineCallback = null) {
       if (sequence.length === 0) return;
       lines = sequence;
+      onLine = lineCallback;
       lineIndex = 0;
       element.hidden = false;
       showLine();

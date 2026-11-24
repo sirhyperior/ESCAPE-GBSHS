@@ -70,6 +70,7 @@ test('1,600 seeded floors have wide, connected corridors and furnished dorm room
   let lounges = 0;
   let bedrooms = 0;
   let bedroomItems = 0;
+  let phoneFloors = 0;
   for (let seed = 0; seed < 320; seed += 1) {
     for (let number = 5; number >= 1; number -= 1) {
       const floor = core.createFloor(number, seed);
@@ -129,6 +130,9 @@ test('1,600 seeded floors have wide, connected corridors and furnished dorm room
       }
 
       assert.ok(floor.rooms.filter(room => room.lounge).length <= 1);
+      const phones = floor.pickups.filter(item => item.id === 'phone');
+      assert.ok(phones.length <= (number >= 4 ? 1 : 0));
+      phoneFloors += phones.length;
       const itemsByRoom = new Map();
       for (const { id, x, y } of floor.pickups) {
         const tile = core.tileAt(x, y, width);
@@ -195,6 +199,7 @@ test('1,600 seeded floors have wide, connected corridors and furnished dorm room
   assert.deepEqual(kinds, new Set(['straight', 'dogleg', 'loop']));
   assert.ok(Math.abs(lounges / 1600 - 0.33) < 0.05);
   assert.ok(Math.abs(bedroomItems / bedrooms - 0.18) < 0.02);
+  assert.ok(Math.abs(phoneFloors / 640 - 0.14) < 0.05);
   assert.deepEqual(itemIds, new Set(Object.keys(items)));
   assert.deepEqual(core.createFloor(5, 1).tiles, core.createFloor(5, 1).tiles);
   assert.deepEqual(core.createFloor(4, 3).pickups, core.createFloor(4, 3).pickups);
@@ -988,4 +993,119 @@ test('bread marks actual movement at regular intervals and its trail persists on
   tick(game, 1);
   assert.equal(game.floor, floor);
   assert.deepEqual([...floor.crumbs.values()], crumbs);
+});
+
+function callFromFifthFloor() {
+  const game = core.createGame(4);
+  const phone = game.floor.pickups.find(item => item.id === 'phone');
+  Object.assign(game.player, { x: phone.x, y: phone.y });
+  tick(game, 1, { ...IDLE, interact: true });
+  assert.equal(game.inventory.active.foundFloor, 5);
+  return game;
+}
+
+function enterPassage(game) {
+  const digits = [0.01, 0.4, 0.1, 0.2, 0.3];
+  game.secretRandom = () => digits.shift();
+  tick(game, 1, { ...IDLE, interact: true });
+  assert.deepEqual(game.phoneCall.lines, ['0... 4... 1... 2', '앗... 방전됐다']);
+  core.revealPhoneLine(game, 0);
+  assert.equal(game.inventory.active.id, 'phone');
+  assert.equal(game.secrets.size, 0);
+  const time = game.time;
+  tick(game, 20, { x: 1, y: 0 });
+  assert.equal(game.time, time);
+  core.revealPhoneLine(game, 1);
+  assert.equal(game.inventory.active, null);
+  assert.equal(game.secrets.get(4).code, '0412');
+  game.phoneCall = null;
+
+  Object.assign(game.player, core.tileCenter(game.floor.goalTile, game.floor.width));
+  tick(game, 1);
+  const floor = game.floor;
+  assert.equal(floor.number, 4);
+  assert.equal(floor.secret.code, '0412');
+  const doorTile = core.tileAt(floor.secret.x, floor.secret.y, floor.width);
+  assert.ok(floor.roomsByTile[doorTile] >= 0);
+  assert.equal(floor.tiles[doorTile], 0);
+  Object.assign(game.player, { x: floor.secret.x, y: floor.secret.y });
+  floor.pickups.push({ id: 'sneakers', x: floor.secret.x, y: floor.secret.y });
+  tick(game, 1, { ...IDLE, interact: true });
+  assert.equal(game.keypadOpen, false);
+  assert.equal(game.inventory.passive.id, 'sneakers');
+  tick(game, 1, { ...IDLE, interact: true });
+  assert.equal(game.keypadOpen, true);
+  assert.equal(core.openSecretPassage(game, '4120'), false);
+  assert.equal(game.floor, floor);
+  assert.equal(core.openSecretPassage(game, '0412'), true);
+  assert.equal(game.area, 'passage');
+  assert.equal(game.inventory.passive.id, 'sneakers');
+}
+
+test('the phone opens one room on the next floor and the passage can lead into a larger dorm', () => {
+  const game = callFromFifthFloor();
+  enterPassage(game);
+  const passage = game.floor;
+  assert.deepEqual([passage.guards.length, passage.cameras.length, passage.pickups.length], [0, 0, 0]);
+  game.inventory.active = { id: 'emp' };
+  game.secretRandom = () => 0.79;
+  tick(game, 140, { x: 1, y: 0 });
+  tick(game, 60, { x: 0, y: -1 });
+  for (let frame = 0; frame < 270 && game.area === 'passage'; frame += 1) tick(game, 1, { x: 1, y: 0 });
+  assert.equal(game.area, 'girls');
+  const floor = game.floor;
+  assert.equal(floor.number, 4);
+  assert.equal(core.tileAt(game.player.x, game.player.y, floor.width), floor.transferTile);
+  assert.ok(floor.roomsByTile[floor.transferTile] >= 0);
+  assert.deepEqual([floor.width, floor.height, floor.guards.length, floor.cameras.length], [63, 41, 5, 4]);
+  assert.deepEqual(game.inventory, { active: null, passive: null });
+  assert.equal(game.secrets.size, 0);
+  assert.equal(floor.secret, undefined);
+  assert.ok(floor.pickups.every(item => item.id !== 'phone'));
+  Object.assign(game.player, core.tileCenter(floor.goalTile, floor.width));
+  tick(game, 1);
+  assert.equal(game.floor.number, 3);
+  assert.equal(game.area, 'girls');
+});
+
+test('a phone keeps its original floor after being swapped and shows only the battery line elsewhere', () => {
+  const game = callFromFifthFloor();
+  Object.assign(game.player, core.tileCenter(game.floor.goalTile, game.floor.width));
+  tick(game, 1);
+  const { floor, player } = game;
+  floor.pickups = [{ id: 'monster', x: player.x, y: player.y }];
+  tick(game, 1, { ...IDLE, interact: true });
+  assert.equal(floor.pickups[0].foundFloor, 5);
+  tick(game, 1, { ...IDLE, interact: true });
+  assert.equal(game.inventory.active.id, 'phone');
+  floor.pickups = [];
+  tick(game, 1, { ...IDLE, interact: true });
+  assert.deepEqual(game.phoneCall.lines, ['앗... 방전됐다']);
+  core.revealPhoneLine(game, 0);
+  assert.equal(game.inventory.active, null);
+  assert.equal(game.secrets.size, 0);
+});
+
+test('the endless study room repeats desk collisions and times the scare from the first flicker', () => {
+  const game = callFromFifthFloor();
+  enterPassage(game);
+  game.secretRandom = () => 0.8;
+  Object.assign(game.player, core.tileCenter(game.floor.goalTile, game.floor.width));
+  tick(game, 1);
+  assert.equal(game.area, 'study');
+  assert.deepEqual(game.inventory, { active: null, passive: null });
+  assert.ok(core.isStudyDesk(1, 1) && core.isStudyDesk(-2, -2));
+  Object.assign(game.player, { x: -2.5, y: -1.5 });
+  tick(game, 20, { x: 1, y: 0 });
+  assert.ok(game.player.x <= -2.25 + 1e-8);
+  Object.assign(game.player, { x: -700.5, y: 0.5 });
+  for (let frame = 0; frame < 300 && game.study.scareAt === null; frame += 1) tick(game, 1, { x: -1, y: 0 });
+  const { scareAt } = game.study;
+  assert.ok(Math.abs(scareAt - game.time - 4.6) < 1e-8);
+  assert.equal(game.study.dimmed, true);
+  tick(game, 20);
+  assert.equal(game.study.dimmed, false);
+  for (let frame = 0; frame < 300 && game.phase === 'playing'; frame += 1) tick(game, 1);
+  assert.equal(game.phase, 'scared');
+  assert.ok(game.time >= scareAt && game.time < scareAt + STEP);
 });
