@@ -6,7 +6,8 @@
   const WALL = 1;
   const FURNITURE = 2;
   const LAYOUTS = ['straight', 'dogleg', 'loop'];
-  const LOUNGE_CHANCE = 0.35;
+  const LOUNGE_CHANCE = 0.33;
+  const BEDROOM_ITEM_CHANCE = 0.18;
   const BEDROOM_SIZES = [[5, 4], [4, 5], [5, 5], [6, 4], [4, 6]];
   const LOUNGE_SIZES = [[6, 5], [5, 6], [6, 6], [7, 6], [6, 7]];
   const PERSONAL_BELONGINGS = ['suitcase', 'duffel', 'plant', 'books', 'shoes', 'desk'];
@@ -295,9 +296,34 @@
     return { ...layout, rooms, furniture };
   }
 
+  function placeRoomItems({ rooms, tiles, width, furniture }, homeRoomId, itemIds, random) {
+    const occupied = new Set();
+    for (const object of furniture) {
+      for (let y = object.y; y < object.y + object.height; y += 1) {
+        for (let x = object.x; x < object.x + object.width; x += 1) occupied.add(tileAt(x, y, width));
+      }
+    }
+
+    const pickups = [];
+    for (const room of rooms) {
+      if (room.id === homeRoomId) continue;
+      if (!room.lounge && random() >= BEDROOM_ITEM_CHANCE) continue;
+      const openings = new Set(room.entrance.inside);
+      const candidates = [];
+      for (let y = room.top; y < room.top + room.height; y += 1) {
+        for (let x = room.left; x < room.left + room.width; x += 1) {
+          const tile = tileAt(x, y, width);
+          if (tiles[tile] === 0 && !occupied.has(tile) && !openings.has(tile)) candidates.push(tile);
+        }
+      }
+      pickups.push({ id: choose(itemIds, random), ...tileCenter(choose(candidates, random), width) });
+    }
+    return pickups;
+  }
+
   const map = {
     WIDTH, HEIGHT, WALL, FURNITURE, LAYOUTS, randomSource, choose, shuffle, tileAt, tileCenter,
-    isWall, isSolid, walkableTiles, createLayout,
+    isWall, isSolid, walkableTiles, createLayout, placeRoomItems,
   };
   if (typeof module === 'object' && module.exports) module.exports = map;
   else root.DormMap = map;

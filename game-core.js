@@ -2,9 +2,10 @@
   'use strict';
 
   const map = typeof module === 'object' && module.exports ? require('./game-map.js') : root.DormMap;
+  const items = typeof module === 'object' && module.exports ? require('./game-items.js') : root.DormItems;
   const {
     WIDTH, HEIGHT, WALL, LAYOUTS, randomSource, choose, shuffle, tileAt, tileCenter,
-    isWall, isSolid, walkableTiles, createLayout,
+    isWall, isSolid, walkableTiles, createLayout, placeRoomItems,
   } = map;
   const MIN_ROUTE = 26;
   const MIN_GUARD_DISTANCE = 12;
@@ -24,12 +25,16 @@
   const PURSUIT_SPACING = 0.8;
   const NOTICE_TIME = 0.75;
   const MAX_STAMINA = 4;
+  const SNEAKER_STAMINA = 0.5;
   const RECOVERY_DELAY = 0.75;
-  const RECOVERY_RATE = MAX_STAMINA / 4;
-  const EXHAUSTED_RECOVERY_RATE = MAX_STAMINA / 7;
   const SEARCH_TIME = 2.5;
   const EPSILON = 1e-9;
+  const ITEM_IDS = Object.keys(items);
+  const ITEM_REACH = { range: 1.25, halfAngle: Math.PI, blocked: isSolid };
+  const CRUMB_SPACING = 0.75;
+  const SHOT_DURATION = 0.38;
   const PLAYER_LIGHT = Object.freeze({ range: 5, halfAngle: 55 * Math.PI / 180 });
+  const NIGHT_VISION_LIGHT = Object.freeze({ ...PLAYER_LIGHT, halfAngle: Math.PI });
   const PATROL_LIGHT = Object.freeze({ range: 6.5, halfAngle: 55 * Math.PI / 180, blocked: isSolid });
   const CHASE_LIGHT = Object.freeze({ range: 8.25, halfAngle: 70 * Math.PI / 180, blocked: isSolid });
 
@@ -97,16 +102,19 @@
     const goalTile = goal.tile;
     const goalTiles = [goalTile - width, goalTile, goalTile + width];
     const upTile = number === 5 ? null : entry.tile;
-    const upTiles = upTile === null ? [] : [upTile - width, upTile, upTile + width];
     const spawnTile = upTile === null ? bedroomTile : stairLanding(main, upTile);
+    const homeRoomId = number === 5 ? layout.roomsByTile[spawnTile] : null;
     const patrolLinks = corridorLinks(routes, upTile === null ? [goalTile] : [goalTile, upTile], width);
     const lookouts = doorwayLookouts(rooms, patrolLinks);
     const difficulty = Math.max(0, 4 - number);
     const patrolSpeed = PATROL_SPEED + 0.1 * difficulty;
     const chaseSpeed = CHASE_SPEED + 0.15 * difficulty;
     const floor = {
-      ...layout, number, spawnTile, goalTile, goalTiles, upTile, upTiles,
+      ...layout, number, spawnTile, homeRoomId, goalTile, goalTiles, upTile,
       patrolLinks, lookouts, random, guards: [], patrolSpeed, chaseSpeed,
+      pickups: placeRoomItems(layout, homeRoomId, ITEM_IDS, randomSource(seed ^ 0xd174dc39)),
+      crumbs: new Map(),
+      empUntil: 0,
     };
 
     const distance = walkableTiles(tiles, spawnTile, -1, width).distance;
@@ -139,6 +147,7 @@
         lastSeen: null,
         unseenTime: 0,
         noticeTime: 0,
+        stunnedUntil: 0,
       };
       choosePatrolPath(floor, guard);
       const next = guard.path[guard.pathIndex];
@@ -182,16 +191,29 @@
     }
     Object.assign(game.player, tileCenter(arrival, width), { angle });
     game.floor = floor;
+    game.crumbDistance = 0;
+    game.dismissedPickup = null;
+    game.shot = null;
   }
 
   function createGame(seed) {
     const random = randomSource(seed);
     const game = {
       random,
+      itemRandom: randomSource(seed ^ 0xe43aef29),
       layoutOrder: shuffle(LAYOUTS.slice(), random),
       floors: new Map(),
       phase: 'playing',
-      player: { x: 0, y: 0, angle: 0, stamina: MAX_STAMINA, restTime: 0, sprintLocked: false, exhausted: false },
+      time: 0,
+      player: {
+        x: 0, y: 0, angle: 0, stamina: MAX_STAMINA, restTime: 0,
+        sprintLocked: false, exhausted: false, sprinting: false,
+        recovering: false, staminaRestoredAt: null, speedBoosted: false,
+        speedBoostUntil: 0, freeSprintUntil: 0,
+      },
+      inventory: { passive: null, active: null },
+      itemEffects: new Map(),
+      useHintUntil: 0,
       floor: null,
     };
     enterFloor(game, 5);
@@ -228,8 +250,21 @@
     return limit;
   }
 
-  function guardLight(guard) {
+  function effectActive(until, time) {
+    return until > time + EPSILON;
+  }
+
+  function guardLight(guard, floor, time) {
+    if (floor && effectActive(floor.empUntil, time)) return null;
     return guard.mode === 'patrol' ? PATROL_LIGHT : CHASE_LIGHT;
+  }
+
+  function playerLight(game) {
+    return game.inventory.passive?.id === 'nightVision' ? NIGHT_VISION_LIGHT : PLAYER_LIGHT;
+  }
+
+  function maxStamina(game) {
+    return MAX_STAMINA + (game.inventory.passive?.id === 'sneakers' ? SNEAKER_STAMINA : 0);
   }
 
   function seesTarget(tiles, actor, target, light, width = WIDTH) {
@@ -257,15 +292,95 @@
     return true;
   }
 
+  function itemInReach({ floor, player }, item) {
+    return seesTarget(floor.tiles, player, item, ITEM_REACH, floor.width);
+  }
+
+  function nearbyItem(game) {
+    const { floor, player } = game;
+    let nearest = null;
+    let bestDistance = Infinity;
+    for (const item of floor.pickups) {
+      const distance = Math.hypot(item.x - player.x, item.y - player.y);
+      if (distance >= bestDistance || !itemInReach(game, item)) continue;
+      bestDistance = distance;
+      nearest = item;
+    }
+    return nearest;
+  }
+
+  function pickupItem(game, item) {
+    const { player, floor, inventory } = game;
+    const { id, x, y } = item;
+    const { type } = items[id];
+    const before = maxStamina(game);
+    const previous = inventory[type];
+    inventory[type] = { id, floorNumber: floor.number, pickedUpAt: game.time };
+    player.stamina *= maxStamina(game) / before;
+    const index = floor.pickups.indexOf(item);
+    if (previous) floor.pickups[index] = { id: previous.id, x, y };
+    else floor.pickups.splice(index, 1);
+    if (type === 'passive') game.crumbDistance = 0;
+    else game.useHintUntil = 0;
+    game.dismissedPickup = item;
+  }
+
+  function hasItemRoute(game) {
+    const { passive } = game.inventory;
+    return passive?.id === 'aiGlasses' && passive.floorNumber === game.floor.number;
+  }
+
+  function heldItem(game) {
+    const { passive } = game.inventory;
+    return passive?.id === 'aiGlasses' && !hasItemRoute(game) ? null : passive;
+  }
+
+  function itemRoute(game) {
+    if (!hasItemRoute(game)) return [];
+    const { floor, player } = game;
+    const start = tileAt(player.x, player.y, floor.width);
+    const tiles = floor.upTile === null ? floor.tiles : floor.tiles.slice();
+    if (floor.upTile !== null) tiles[floor.upTile] = WALL;
+    const { distance, previous } = walkableTiles(tiles, start, -1, floor.width);
+    let nearest = -1;
+    for (const tile of floor.goalTiles) {
+      if (distance[tile] >= 0 && (nearest === -1 || distance[tile] < distance[nearest])) nearest = tile;
+    }
+    const path = [];
+    for (let tile = nearest; tile !== -1; tile = previous[tile]) path.push(tileCenter(tile, floor.width));
+    return path.reverse();
+  }
+
+  function leaveCrumbs(game, startX, startY, distance) {
+    const { floor, player } = game;
+    for (let travel = CRUMB_SPACING - game.crumbDistance; travel <= distance; travel += CRUMB_SPACING) {
+      const x = startX + (player.x - startX) * travel / distance;
+      const y = startY + (player.y - startY) * travel / distance;
+      floor.crumbs.set(tileAt(x * 2, y * 2, floor.width * 2), { x, y });
+    }
+    game.crumbDistance = (game.crumbDistance + distance) % CRUMB_SPACING;
+  }
+
+  function exhaust(player) {
+    player.stamina = 0;
+    player.restTime = 0;
+    player.sprintLocked = true;
+    player.exhausted = true;
+  }
+
   function updatePlayer(game, input, dt) {
     const { player, floor } = game;
     if (!input.sprint || input.sprintReleased) player.sprintLocked = false;
 
     const magnitude = Math.hypot(input.x, input.y);
+    const freeSprint = effectActive(player.freeSprintUntil, game.time);
     const canSprint = magnitude > 0 && input.sprint && !player.sprintLocked && !player.exhausted && player.stamina > EPSILON;
-    const sprintTime = canSprint ? Math.min(dt, player.stamina) : 0;
+    const sprintTime = canSprint ? (freeSprint ? dt : Math.min(dt, player.stamina)) : 0;
     const speed = player.exhausted ? EXHAUSTED_SPEED : WALK_SPEED;
-    const travel = speed * dt + (RUN_SPEED - speed) * sprintTime;
+    const sneakers = game.inventory.passive?.id === 'sneakers';
+    const runningSpeed = sneakers ? RUN_SPEED * 1.1 : RUN_SPEED;
+    const boost = effectActive(player.speedBoostUntil, game.time) ? 1.5 : 1;
+    const travel = (speed * dt + (runningSpeed - speed) * sprintTime) * boost;
     const startX = player.x;
     const startY = player.y;
 
@@ -276,26 +391,34 @@
       if (canStand(floor, player.x, y, PLAYER_RADIUS)) player.y = y;
     }
 
-    const moved = Math.hypot(player.x - startX, player.y - startY) > EPSILON;
-    if (moved) player.angle = Math.atan2(player.y - startY, player.x - startX);
+    const distance = Math.hypot(player.x - startX, player.y - startY);
+    if (distance > EPSILON) {
+      player.angle = Math.atan2(player.y - startY, player.x - startX);
+      if (game.inventory.passive?.id === 'bread') leaveCrumbs(game, startX, startY, distance);
+    }
 
-    if (moved && sprintTime > 0) {
-      player.stamina -= sprintTime;
+    player.sprinting = distance > EPSILON && sprintTime > 0;
+    player.speedBoosted = boost > 1 || (player.sprinting && sneakers);
+    player.recovering = false;
+    if (player.sprinting) {
       player.restTime = 0;
-      if (player.stamina <= EPSILON) {
-        player.stamina = 0;
-        player.sprintLocked = true;
-        player.exhausted = true;
+      if (!freeSprint) {
+        player.stamina -= sprintTime;
+        if (player.stamina <= EPSILON) exhaust(player);
       }
     } else {
       player.restTime += dt;
       const recoveryTime = Math.max(0, Math.min(dt, player.restTime - RECOVERY_DELAY));
-      const rate = player.exhausted ? EXHAUSTED_RECOVERY_RATE : RECOVERY_RATE;
+      const maximum = maxStamina(game);
+      const rate = maximum / (player.exhausted ? 7 : 4);
+      const previous = player.stamina;
       player.stamina += recoveryTime * rate;
-      if (player.stamina >= MAX_STAMINA - EPSILON) {
-        player.stamina = MAX_STAMINA;
+      if (player.stamina >= maximum - EPSILON) {
+        player.stamina = maximum;
         player.exhausted = false;
       }
+      player.recovering = player.stamina > previous + EPSILON;
+      if (player.recovering && player.stamina === maximum) player.staminaRestoredAt = game.time;
     }
   }
 
@@ -357,6 +480,76 @@
     guard.lookTime = 0;
     guard.lookCooldown = 1;
     rejoinPatrol(floor, guard);
+  }
+
+  function clearAlert(floor) {
+    for (const guard of floor.guards) {
+      guard.noticeTime = 0;
+      if (guard.mode !== 'patrol') returnToPatrol(floor, guard);
+    }
+  }
+
+  function showItemEffect(game, id, { key = 'used', until, floorNumber = null } = {}) {
+    game.itemEffects.set(`${id}:${key}`, {
+      id, key, startedAt: game.time, until: until ?? game.time + 1.5,
+      timed: until !== undefined, floorNumber,
+    });
+  }
+
+  function useItem(game) {
+    const { inventory, floor, player, time } = game;
+    if (!inventory.active) return;
+    const { id } = inventory.active;
+    let feedback;
+    switch (id) {
+      case 'monster':
+        if (player.stamina < maxStamina(game)) player.staminaRestoredAt = time;
+        player.stamina = maxStamina(game);
+        player.exhausted = false;
+        player.sprintLocked = false;
+        player.speedBoostUntil = time + 7;
+        feedback = { key: 'speed', until: player.speedBoostUntil };
+        break;
+      case 'bbGun': {
+        let target = null;
+        let nearest = Infinity;
+        for (const guard of floor.guards) {
+          if (guard.mode === 'patrol') continue;
+          const distance = Math.hypot(guard.x - player.x, guard.y - player.y);
+          if (distance >= nearest) continue;
+          target = guard;
+          nearest = distance;
+        }
+        if (!target) {
+          game.useHintUntil = time + 2;
+          return;
+        }
+        game.shot = { from: { x: player.x, y: player.y }, to: { x: target.x, y: target.y }, startedAt: time };
+        clearAlert(floor);
+        target.stunnedUntil = time + 3;
+        feedback = { key: 'stun', until: target.stunnedUntil, floorNumber: floor.number };
+        break;
+      }
+      case 'reagent':
+        if (game.itemRandom() < 0.5) {
+          exhaust(player);
+          feedback = { key: 'exhausted' };
+        } else {
+          player.freeSprintUntil = time + 5;
+          feedback = { key: 'freeSprint', until: player.freeSprintUntil };
+        }
+        break;
+      case 'emp':
+        floor.empUntil = time + 4;
+        clearAlert(floor);
+        feedback = { key: 'blackout', until: floor.empUntil, floorNumber: floor.number };
+        break;
+      default:
+        return;
+    }
+    showItemEffect(game, id, feedback);
+    game.useHintUntil = 0;
+    if (items[id].consumable) inventory.active = null;
   }
 
   function rejoinPatrol({tiles, width, guards, patrolLinks}, guard, avoidGuards = false) {
@@ -471,8 +664,8 @@
     guard.angle += Math.sign(shortest) * Math.min(Math.abs(shortest), speed * dt);
   }
 
-  function updateGuard(floor, guard, player, dt) {
-    const visible = seesTarget(floor.tiles, guard, player, guardLight(guard), floor.width);
+  function updateGuard(floor, guard, player, light, dt) {
+    const visible = light && seesTarget(floor.tiles, guard, player, light, floor.width);
     if (guard.mode === 'patrol') {
       guard.noticeTime = visible ? guard.noticeTime + dt : 0;
       if (visible && guard.noticeTime < NOTICE_TIME - EPSILON) {
@@ -501,26 +694,41 @@
 
   function step(game, input, dt) {
     if (game.phase !== 'playing') return;
+    game.time += dt;
+    for (const [key, effect] of game.itemEffects) {
+      if (!effectActive(effect.until, game.time)) game.itemEffects.delete(key);
+    }
+    if (game.dismissedPickup && !itemInReach(game, game.dismissedPickup)) game.dismissedPickup = null;
+    if (input.interact) {
+      const item = nearbyItem(game);
+      if (item) pickupItem(game, item);
+      else useItem(game);
+    }
     updatePlayer(game, input, dt);
-    const { player, floor } = game;
+    const { player, floor, time } = game;
 
     const tile = tileAt(player.x, player.y, floor.width);
-    const goingUp = floor.upTiles.includes(tile);
+    const goingUp = tile === floor.upTile;
     if (goingUp || floor.goalTiles.includes(tile)) {
+      if (!goingUp && game.inventory.passive?.id === 'aiGlasses') {
+        game.inventory.passive = null;
+        showItemEffect(game, 'aiGlasses', { key: 'spent' });
+      }
       if (floor.number === 1 && !goingUp) game.phase = 'escaped';
       else {
-        for (const guard of floor.guards) {
-          guard.noticeTime = 0;
-          if (guard.mode !== 'patrol') returnToPatrol(floor, guard);
-        }
+        clearAlert(floor);
         enterFloor(game, floor.number + (goingUp ? 1 : -1));
       }
       return;
     }
 
+    const inHome = floor.homeRoomId !== null && floor.roomsByTile[tile] === floor.homeRoomId;
+    if (inHome) clearAlert(floor);
     for (const guard of floor.guards) {
-      updateGuard(floor, guard, player, dt);
-      if (Math.hypot(player.x - guard.x, player.y - guard.y) <= PLAYER_RADIUS + GUARD_RADIUS) {
+      if (effectActive(guard.stunnedUntil, time)) continue;
+      const light = inHome ? null : guardLight(guard, floor, time);
+      updateGuard(floor, guard, player, light, dt);
+      if (light && Math.hypot(player.x - guard.x, player.y - guard.y) <= PLAYER_RADIUS + GUARD_RADIUS) {
         game.phase = 'caught';
         return;
       }
@@ -528,8 +736,9 @@
   }
 
   const core = {
-    WIDTH, HEIGHT, PLAYER_RADIUS, GUARD_RADIUS, MAX_STAMINA, PLAYER_LIGHT,
-    createFloor, createGame, step, guardLight, isWall, isSolid, tileAt, tileCenter, walkableTiles, castRay, seesTarget,
+    WIDTH, HEIGHT, PLAYER_RADIUS, GUARD_RADIUS, MAX_STAMINA, PLAYER_LIGHT, SHOT_DURATION,
+    createFloor, createGame, step, guardLight, playerLight, maxStamina, nearbyItem, hasItemRoute, itemRoute, heldItem,
+    isWall, isSolid, tileAt, tileCenter, walkableTiles, castRay, seesTarget,
   };
 
   if (typeof module === 'object' && module.exports) module.exports = core;

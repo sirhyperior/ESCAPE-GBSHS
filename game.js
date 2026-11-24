@@ -2,6 +2,7 @@
   'use strict';
 
   const core = window.DormEscape;
+  const items = window.DormItems;
   const audio = window.DormAudio.create();
   const dialogue = window.DormDialogue.create(document.getElementById('dialogue'), audio.playDialogue);
   const canvas = document.getElementById('scene');
@@ -10,8 +11,19 @@
   const floorNumber = document.getElementById('floor');
   const objective = document.getElementById('objective');
   const stamina = document.getElementById('stamina');
+  const staminaPanel = stamina.parentElement;
   const staminaPercent = document.getElementById('stamina-percent');
   const fatigue = document.getElementById('fatigue');
+  const itemHint = document.getElementById('item-hint');
+  const itemEffects = document.getElementById('item-effects');
+  const itemCard = document.getElementById('item-card');
+  const itemName = itemCard.querySelector('.item-name');
+  const itemDescription = itemCard.querySelector('.item-description');
+  const itemPreview = itemCard.querySelector('canvas');
+  const inventorySlots = {
+    passive: document.getElementById('passive-slot'),
+    active: document.getElementById('active-slot'),
+  };
   const alert = document.getElementById('alert');
   const transitionOverlay = document.getElementById('scene-transition');
   const floorAnnouncement = document.getElementById('floor-announcement');
@@ -23,6 +35,7 @@
   const startButton = document.getElementById('start');
   const soundToggle = document.getElementById('sound-toggle');
   const movementKeys = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ShiftLeft', 'ShiftRight']);
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
   const floorColors = ['#47534a', '#49554b', '#455149'];
   const corridorColors = ['#333e38', '#354039', '#313c37'];
   const furnitureColors = {
@@ -38,7 +51,24 @@
   const NEARBY_STAIR_SIGHT = { range: 2.4, halfAngle: Math.PI };
   const GAME_FONT = getComputedStyle(document.documentElement).getPropertyValue('--game-font');
   const EFFECT_MS = { floor: 1150, escaped: 820, caught: 680 };
+  const BURST_DURATION = 0.55;
+  const STAMINA_EFFECT_COLOR = '#b6e9ae';
+  const SPEED_EFFECT_COLOR = '#95e5ee';
   const OPENING_DIALOGUE = ['아... 개같은 학교 때려치워야지'];
+  const itemSprites = Object.fromEntries(Object.entries(items).map(([id, item]) => {
+    const sprite = document.createElement('canvas');
+    sprite.width = sprite.height = 12;
+    const pixels = sprite.getContext('2d');
+    item.pixels.forEach((row, y) => {
+      [...row].forEach((color, x) => {
+        if (color === '.') return;
+        pixels.fillStyle = item.palette[color];
+        pixels.fillRect(x, y, 1, 1);
+      });
+    });
+    return [id, sprite];
+  }));
+  const effectRows = new Map();
 
   let game = core.createGame(17029);
   let seed;
@@ -55,7 +85,9 @@
   let sceneLayer = null;
   let dirty = true;
   let sprintReleased = false;
+  let interactPressed = false;
   let soundEnabled = true;
+  let nearbyPickup = null;
   const keys = new Set();
 
   function resize() {
@@ -71,6 +103,7 @@
   function clearKeys() {
     keys.clear();
     sprintReleased = false;
+    interactPressed = false;
     accumulator = 0;
     previousFrame = 0;
     previousPose = null;
@@ -90,8 +123,10 @@
       y: Number(keys.has('ArrowDown')) - Number(keys.has('ArrowUp')),
       sprint: sprintHeld(),
       sprintReleased,
+      interact: interactPressed,
     };
     sprintReleased = false;
+    interactPressed = false;
     return controls;
   }
 
@@ -107,8 +142,8 @@
     screen.hidden = true;
     hud.hidden = false;
     dirty = true;
-    updateHud();
     beginTransition('floor', startedAt, firstStart ? () => showDialogue(OPENING_DIALOGUE) : null);
+    updateHud();
     const initialFloor = game.floor;
     audio.unlock().then(ready => {
       if (ready && game.floor === initialFloor && transition?.kind === 'floor') audio.play('floor');
@@ -166,10 +201,14 @@
       floorNumber.textContent = number;
       objective.textContent = number === '1' ? '1층 출구 찾기' : '아래층 계단 찾기';
     }
+    const maximum = core.maxStamina(game);
+    if (stamina.max !== maximum) stamina.max = maximum;
     stamina.value = game.player.stamina;
-    const percent = `${Math.floor(game.player.stamina / core.MAX_STAMINA * 100)}%`;
+    const percent = `${Math.floor(game.player.stamina / maximum * 100)}%`;
     if (staminaPercent.textContent !== percent) staminaPercent.textContent = percent;
-    stamina.parentElement.toggleAttribute('data-exhausted', game.player.exhausted);
+    staminaPanel.toggleAttribute('data-exhausted', game.player.exhausted);
+    staminaPanel.toggleAttribute('data-recovering', game.player.recovering);
+    staminaPanel.toggleAttribute('data-restored', burstActive(game.player.staminaRestoredAt));
     const fatigueMessage = game.player.exhausted ? '지침 · 회복 중' : game.player.sprintLocked ? 'Shift 키 놓기' : '';
     if (fatigue.textContent !== fatigueMessage) fatigue.textContent = fatigueMessage;
     fatigue.hidden = fatigueMessage === '';
@@ -184,6 +223,99 @@
     alert.toggleAttribute('data-warning', warning);
     if (alert.textContent !== status) alert.textContent = status;
     alert.hidden = status === '';
+    updateEffectHud();
+    updateItemHud();
+  }
+
+  function setItemIcon(iconCanvas, id) {
+    const icon = iconCanvas.getContext('2d');
+    icon.clearRect(0, 0, iconCanvas.width, iconCanvas.height);
+    if (id) icon.drawImage(itemSprites[id], 0, 0);
+  }
+
+  function effectOnFloor(effect) {
+    return effect.floorNumber === null || effect.floorNumber === game.floor.number;
+  }
+
+  function effectColor(id, key) {
+    return key === 'exhausted' ? '#f3a488' : items[id].feedback?.color ?? '#e0ca87';
+  }
+
+  function updateEffectHud() {
+    const held = core.heldItem(game);
+    const visible = [];
+    if (held) {
+      const key = items[held.id].feedback?.sprint && game.player.sprinting ? 'sprint' : 'held';
+      visible.push({ id: held.id, key, held: true });
+    }
+    for (const effect of game.itemEffects.values()) {
+      if (effectOnFloor(effect)) visible.push(effect);
+    }
+    itemEffects.hidden = visible.length === 0;
+    if (!visible.length && !effectRows.size) return;
+    const showing = new Set();
+    for (const effect of visible) {
+      const { id, key } = effect;
+      const rowKey = `${id}:${key}`;
+      showing.add(rowKey);
+      let row = effectRows.get(rowKey);
+      if (!row) {
+        const item = items[id];
+        const entry = document.createElement('li');
+        entry.className = 'item-effect';
+        entry.title = item.name;
+        entry.style.setProperty('--effect-color', effectColor(id, key));
+        const icon = document.createElement('canvas');
+        icon.width = icon.height = 12;
+        icon.setAttribute('aria-hidden', 'true');
+        setItemIcon(icon, id);
+        const label = document.createElement('span');
+        label.textContent = item.feedback?.[key] ?? `${item.name} ${effect.held ? '효과 적용' : '사용'}`;
+        const remaining = document.createElement('span');
+        remaining.className = 'item-effect-time';
+        remaining.setAttribute('aria-hidden', 'true');
+        remaining.hidden = !effect.timed;
+        entry.append(icon, label, remaining);
+        if (effect.held) itemEffects.prepend(entry);
+        else itemEffects.append(entry);
+        row = { entry, remaining };
+        effectRows.set(rowKey, row);
+      }
+      if (effect.timed) {
+        const seconds = `${Math.ceil(effect.until - game.time - 1e-9)}초`;
+        if (row.remaining.textContent !== seconds) row.remaining.textContent = seconds;
+      }
+    }
+    for (const [key, row] of effectRows) {
+      if (showing.has(key)) continue;
+      row.entry.remove();
+      effectRows.delete(key);
+    }
+  }
+
+  function updateItemHud() {
+    for (const [type, slot] of Object.entries(inventorySlots)) {
+      const id = game.inventory[type]?.id ?? '';
+      if (slot.dataset.item === id) continue;
+      const icon = slot.querySelector('canvas');
+      const label = type === 'passive' ? '패시브' : '액티브';
+      slot.dataset.item = id;
+      slot.toggleAttribute('data-filled', Boolean(id));
+      slot.setAttribute('aria-label', `${label} ${id ? items[id].name : '빈 칸'}`);
+      icon.hidden = !id;
+      setItemIcon(icon, id);
+    }
+
+    nearbyPickup = transition ? null : core.nearbyItem(game);
+    const preview = game.dismissedPickup ? null : nearbyPickup;
+    itemCard.hidden = !preview;
+    itemHint.hidden = Boolean(transition) || game.useHintUntil <= game.time;
+    if (!preview) return;
+    if (itemCard.dataset.item === preview.id) return;
+    itemCard.dataset.item = preview.id;
+    itemName.textContent = items[preview.id].name;
+    itemDescription.textContent = items[preview.id].description;
+    setItemIcon(itemPreview, preview.id);
   }
 
   function obstacleCorners({tiles, width, height}, blocked) {
@@ -213,7 +345,9 @@
     const corners = blocked === core.isSolid ? sceneLayer.solidCorners : sceneLayer.wallCorners;
     const minY = Math.max(0, Math.ceil(actor.y - range));
     const maxY = Math.min(corners.length - 1, Math.floor(actor.y + range));
-    const heading = Math.atan2(Math.sin(actor.angle), Math.cos(actor.angle));
+    const fullCircle = light.halfAngle === Math.PI;
+    const facing = fullCircle ? 0 : actor.angle;
+    const heading = Math.atan2(Math.sin(facing), Math.cos(facing));
 
     // Include both sides of obstacle corners so the edge of a shadow stays sharp.
     for (let y = minY; y <= maxY; y += 1) {
@@ -224,16 +358,15 @@
         let relative = Math.atan2(dy, dx) - heading;
         if (relative > Math.PI) relative -= FULL_TURN;
         if (relative < -Math.PI) relative += FULL_TURN;
-        if (Math.abs(relative) >= light.halfAngle - 0.0001) continue;
+        if (!fullCircle && Math.abs(relative) >= light.halfAngle - 0.0001) continue;
         angles.push(relative - 0.0001, relative, relative + 0.0001);
       }
     }
 
     const path = new Path2D();
-    const fullCircle = light.halfAngle === Math.PI;
     if (!fullCircle) path.moveTo(actor.x, actor.y);
     for (const [index, relative] of angles.sort((first, second) => first - second).entries()) {
-      const angle = actor.angle + relative;
+      const angle = facing + relative;
       const dx = Math.cos(angle);
       const dy = Math.sin(angle);
       const distance = core.castRay(tiles, actor.x, actor.y, dx, dy, range, blocked, width);
@@ -439,7 +572,7 @@
       if (Math.abs(x - player.x) > range || Math.abs(y - player.y) > range) continue;
       let label = `${floor.number * 100 + room.number}호`;
       if (room.lounge) label = '휴게실';
-      else if (floor.number === 5 && room.tile === floor.spawnTile) label = '내 방';
+      else if (room.id === floor.homeRoomId) label = '내 방';
       context.fillText(label, x, y);
     }
   }
@@ -452,13 +585,14 @@
     const exit = kind === 'exit';
     const up = kind === 'up';
     const accent = exit ? '#a9e6b9' : up ? '#a5ddec' : '#f3d991';
+    const signHeight = up ? 0.92 : 2.9;
     context.save();
     if (!core.seesTarget(floor.tiles, player, marker, NEARBY_STAIR_SIGHT, floor.width)) context.clip(playerBeam);
     context.fillStyle = exit ? '#233e31' : up ? '#203946' : '#423c28';
-    context.fillRect(x - 0.43, y - 1.45, 0.86, 2.9);
+    context.fillRect(x - 0.43, y - signHeight / 2, 0.86, signHeight);
     context.strokeStyle = accent;
     context.lineWidth = 0.025;
-    context.strokeRect(x - 0.43, y - 1.45, 0.86, 2.9);
+    context.strokeRect(x - 0.43, y - signHeight / 2, 0.86, signHeight);
     context.beginPath();
     if (exit) {
       context.rect(x - 0.19, y - 0.26, 0.38, 0.49);
@@ -467,7 +601,7 @@
     } else {
       const tip = y + (up ? -0.32 : 0.25);
       const shoulder = tip + (up ? 0.19 : -0.19);
-      context.moveTo(x, y + (up ? 0.25 : -0.32));
+      context.moveTo(x, y + (up ? 0.06 : -0.32));
       context.lineTo(x, tip);
       context.moveTo(x - 0.2, shoulder);
       context.lineTo(x, tip);
@@ -481,7 +615,7 @@
     context.font = `700 0.32px ${GAME_FONT}`;
     context.textAlign = 'center';
     context.textBaseline = 'middle';
-    context.fillText(exit ? '출구' : up ? '위층' : '아래층', x, y + 0.61, 0.73);
+    context.fillText(exit ? '출구' : up ? '위층' : '아래층', x, y + (up ? 0.26 : 0.61), 0.73);
     context.restore();
   }
 
@@ -502,6 +636,138 @@
     context.stroke();
     context.fillStyle = lamp;
     context.fillRect(radius - 0.07, -0.057, 0.16, 0.114);
+    context.restore();
+  }
+
+  function drawGroundItem({ id, x, y }, nearby) {
+    context.fillStyle = '#131915';
+    context.fillRect(x - 0.27, y + 0.12, 0.54, 0.15);
+    context.fillStyle = nearby ? '#e0ca87' : '#8a8054';
+    context.fillRect(x - 0.18, y + 0.23, 0.36, 0.035);
+    context.imageSmoothingEnabled = false;
+    context.drawImage(itemSprites[id], x - 0.3, y - 0.36, 0.6, 0.6);
+    context.imageSmoothingEnabled = true;
+  }
+
+  function drawCrumbs(floor, player, range) {
+    if (floor.crumbs.size === 0) return;
+    const left = Math.max(0, Math.floor((player.x - range) * 2));
+    const right = Math.min(floor.width * 2 - 1, Math.floor((player.x + range) * 2));
+    const top = Math.max(0, Math.floor((player.y - range) * 2));
+    const bottom = Math.min(floor.height * 2 - 1, Math.floor((player.y + range) * 2));
+    for (let row = top; row <= bottom; row += 1) {
+      for (let column = left; column <= right; column += 1) {
+        const crumb = floor.crumbs.get(core.tileAt(column, row, floor.width * 2));
+        if (!crumb) continue;
+        const { x, y } = crumb;
+        context.fillStyle = '#efc280';
+        context.fillRect(x - 0.035, y - 0.035, 0.07, 0.07);
+        context.fillStyle = '#b38654';
+        context.fillRect(x + 0.055, y + 0.04, 0.045, 0.045);
+      }
+    }
+  }
+
+  function drawItemRoute() {
+    if (!core.hasItemRoute(game)) return;
+    const { floor, player } = game;
+    const tile = core.tileAt(player.x, player.y, floor.width);
+    if (sceneLayer.guide?.tile !== tile) {
+      const points = core.itemRoute(game);
+      const path = new Path2D();
+      if (points.length > 1) {
+        path.moveTo(points[0].x, points[0].y);
+        for (const { x, y } of points.slice(1)) path.lineTo(x, y);
+      }
+      sceneLayer.guide = { tile, path };
+    }
+    context.save();
+    context.setLineDash([0.16, 0.18]);
+    context.lineWidth = 0.055;
+    context.strokeStyle = '#7bcdd5b8';
+    context.stroke(sceneLayer.guide.path);
+    context.restore();
+  }
+
+  function drawShot() {
+    if (!game.shot) return;
+    const { from, to, startedAt } = game.shot;
+    const progress = (game.time - startedAt) / core.SHOT_DURATION;
+    if (progress >= 1) return;
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const flight = Math.min(1, progress / 0.62);
+    if (progress < 0.3) {
+      context.save();
+      context.translate(from.x, from.y);
+      context.rotate(Math.atan2(dy, dx));
+      context.fillStyle = '#fae0a8';
+      context.fillRect(0.22, -0.045, 0.24 - progress * 0.25, 0.09);
+      context.restore();
+    }
+    context.save();
+    if (flight < 1) {
+      const trail = Math.max(0, flight - 0.13);
+      context.beginPath();
+      context.moveTo(from.x + dx * trail, from.y + dy * trail);
+      context.lineTo(from.x + dx * flight, from.y + dy * flight);
+      context.lineWidth = 0.055;
+      context.strokeStyle = '#ffe3a6';
+      context.stroke();
+    } else {
+      context.globalAlpha = (1 - progress) / 0.38;
+      context.fillStyle = '#ffd288';
+      for (const [x, y] of [[0, -0.26], [0.23, -0.1], [-0.21, 0.13], [0.13, 0.22]]) {
+        context.fillRect(to.x + x * progress, to.y + y * progress, 0.075, 0.075);
+      }
+    }
+    context.restore();
+  }
+
+  function burstActive(startedAt) {
+    return Number.isFinite(startedAt) && game.time - startedAt < BURST_DURATION;
+  }
+
+  function drawEffectBurst(startedAt, color, offset) {
+    const progress = (game.time - startedAt) / BURST_DURATION;
+    const radius = 0.29 + progress * 0.48;
+    context.globalAlpha = 1 - progress;
+    context.fillStyle = color;
+    for (let index = 0; index < 8; index += 1) {
+      const angle = offset + index * FULL_TURN / 8;
+      const size = (index % 2 === 0 ? 0.08 : 0.055) * (1 - progress * 0.55);
+      context.fillRect(Math.cos(angle) * radius - size / 2, Math.sin(angle) * radius - size / 2, size, size);
+    }
+  }
+
+  function drawPlayerEffects(player) {
+    if (reducedMotion.matches) return;
+    const current = game.player;
+    context.save();
+    context.translate(player.x, player.y);
+    const previous = previousPose?.player;
+    if (current.speedBoosted && previous && (current.x !== previous.x || current.y !== previous.y)) {
+      context.save();
+      context.rotate(player.angle);
+      const phase = (game.time * 5) % 1;
+      context.fillStyle = SPEED_EFFECT_COLOR;
+      context.globalAlpha = 0.8 - phase * 0.45;
+      context.fillRect(-0.51 - phase * 0.27, -0.14, 0.23 - phase * 0.09, 0.04);
+      context.fillRect(-0.45 - phase * 0.19, 0.09, 0.19 - phase * 0.06, 0.035);
+      context.fillRect(-0.61 - phase * 0.23, 0.23, 0.16 - phase * 0.07, 0.032);
+      context.restore();
+    }
+
+    if (burstActive(current.staminaRestoredAt)) {
+      drawEffectBurst(current.staminaRestoredAt, STAMINA_EFFECT_COLOR, Math.PI / 8);
+    }
+    const held = core.heldItem(game);
+    if (burstActive(held?.pickedUpAt)) drawEffectBurst(held.pickedUpAt, effectColor(held.id, 'held'), 0);
+    for (const effect of game.itemEffects.values()) {
+      if (effectOnFloor(effect) && burstActive(effect.startedAt)) {
+        drawEffectBurst(effect.startedAt, effectColor(effect.id, effect.key), 0);
+      }
+    }
     context.restore();
   }
 
@@ -617,7 +883,7 @@
     const y = previous.y + (actor.y - previous.y) * fraction;
     const difference = actor.angle - previous.angle;
     const angle = rotate ? previous.angle + Math.atan2(Math.sin(difference), Math.cos(difference)) * fraction : actor.angle;
-    return { x, y, angle, mode: actor.mode };
+    return { x, y, angle, mode: actor.mode, stunnedUntil: actor.stunnedUntil };
   }
 
   function drawScene() {
@@ -651,33 +917,53 @@
     const cueRange = intro ? core.PLAYER_LIGHT.range : GUARD_CUE_LIGHT.range;
     const lamps = [];
     for (const guard of guards) {
-      const light = core.guardLight(guard);
+      const light = core.guardLight(guard, floor, game.time);
+      if (!light) continue;
       if (Math.hypot(guard.x - player.x, guard.y - player.y) > cueRange + light.range) continue;
       lamps.push(createGuardLamp(floor, guard, light));
     }
     if (!intro && lamps.length > 0) drawGuardCues(floor, player, lamps);
 
-    const playerBeam = beamPath(floor, player, core.PLAYER_LIGHT);
+    const playerLight = core.playerLight(game);
+    const playerBeam = beamPath(floor, player, playerLight);
     context.save();
     context.clip(playerBeam);
     drawSceneLayer(player);
     drawRoomLabels(floor, player);
 
-    const light = context.createRadialGradient(player.x, player.y, 0.1, player.x, player.y, core.PLAYER_LIGHT.range);
-    light.addColorStop(0, '#fff0b945');
-    light.addColorStop(0.58, '#dfd9a41b');
+    const light = context.createRadialGradient(player.x, player.y, 0.1, player.x, player.y, playerLight.range);
+    const circularLight = playerLight.halfAngle === Math.PI;
+    light.addColorStop(0, circularLight ? '#dbf5ac55' : '#fff0b945');
+    light.addColorStop(0.58, circularLight ? '#a9d49326' : '#dfd9a41b');
     light.addColorStop(1, '#070b0b95');
     context.fillStyle = light;
     context.fill(playerBeam);
     drawGuardLamps(lamps);
-    for (const { guard } of lamps) {
-      if (guard.mode === 'patrol') drawActor(guard, core.GUARD_RADIUS, '#664440', '#e39883', '#ffcb8a');
+    if (!intro) {
+      drawCrumbs(floor, player, playerLight.range);
+      for (const item of floor.pickups) {
+        if (item !== nearbyPickup) drawGroundItem(item, false);
+      }
+    }
+    for (const guard of guards) {
+      if (guard.mode !== 'patrol') continue;
+      const lamp = core.guardLight(guard, floor, game.time) ? '#ffcb8a' : '#363531';
+      drawActor(guard, core.GUARD_RADIUS, '#664440', '#e39883', lamp);
+      if (guard.stunnedUntil > game.time) {
+        context.fillStyle = '#ffd288';
+        context.fillRect(guard.x - 0.09, guard.y - 0.39, 0.05, 0.05);
+        context.fillRect(guard.x + 0.04, guard.y - 0.46, 0.055, 0.055);
+      }
     }
     context.restore();
 
     drawStairSign(floor, player, playerBeam, floor.goalTile, floor.number === 1 ? 'exit' : 'down');
     drawStairSign(floor, player, playerBeam, floor.upTile, 'up');
+    drawItemRoute();
+    if (nearbyPickup) drawGroundItem(nearbyPickup, true);
+    if (!intro && !dialogue.active) drawPlayerEffects(player);
     drawActor(player, core.PLAYER_RADIUS, '#a6c3ac', '#d0e4c8', '#fff0b7');
+    drawShot();
     context.restore();
     if (!intro) drawTrackedGuards(guards, player, scale);
   }
@@ -705,7 +991,7 @@
     if (accumulator < STEP) return;
     while (accumulator >= STEP) {
       const { floor, player } = game;
-      const { x, y, stamina: previousStamina } = player;
+      const { x, y } = player;
       previousPose = { player: actorPose(player), guards: floor.guards.map(actorPose) };
       core.step(game, input(), STEP);
       accumulator -= STEP;
@@ -718,7 +1004,7 @@
       }
       audio.update({
         speed: Math.hypot(player.x - x, player.y - y) / STEP,
-        sprinting: player.stamina < previousStamina,
+        sprinting: player.sprinting,
         exhausted: player.exhausted,
         alerted: floor.guards.some(guard => guard.mode !== 'patrol'),
       }, STEP);
@@ -738,9 +1024,11 @@
   }
 
   window.addEventListener('keydown', event => {
+    const interact = event.code === 'Space';
+    if (interact && event.target === soundToggle) return;
     if (dialogue.active) {
-      if (movementKeys.has(event.code) || event.code === 'KeyA') event.preventDefault();
-      if (event.code === 'KeyA' && !event.repeat) {
+      if (movementKeys.has(event.code) || interact) event.preventDefault();
+      if (interact && !event.repeat) {
         dialogue.next();
         if (!dialogue.active) {
           clearKeys();
@@ -753,10 +1041,11 @@
       if (event.key === 'Enter' && !event.repeat && document.activeElement !== startButton && document.activeElement !== soundToggle) startGame();
       return;
     }
-    if (!movementKeys.has(event.code)) return;
+    if (!movementKeys.has(event.code) && !interact) return;
     event.preventDefault();
     if (transition || event.repeat) return;
-    keys.add(event.code);
+    if (interact) interactPressed = true;
+    else keys.add(event.code);
   });
 
   window.addEventListener('keyup', event => {
@@ -770,11 +1059,12 @@
   });
   window.addEventListener('resize', resize);
   startButton.addEventListener('click', startGame);
-  soundToggle.addEventListener('click', () => {
+  soundToggle.addEventListener('click', event => {
     soundEnabled = !soundEnabled;
     soundToggle.setAttribute('aria-pressed', String(soundEnabled));
     soundToggle.textContent = soundEnabled ? '소리 켜짐' : '소리 꺼짐';
     applySoundPreference();
+    if (view === 'playing' && event.detail > 0) soundToggle.blur();
   });
   resize();
   document.fonts.load('20px LeeSeoyun').then(() => { dirty = true; }, () => {});
