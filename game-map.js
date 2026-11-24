@@ -116,6 +116,27 @@
     ];
   }
 
+  function addCrossPassages(plan, count, random) {
+    if (count === 0) return;
+    const [main, bypass, ...connections] = plan;
+    const [, [nearX, y], [farX]] = bypass;
+    const used = connections.map(([[x]]) => x);
+    let candidates = [];
+    for (let i = 1; i < main.length; i += 1) {
+      const [startX, startY] = main[i - 1];
+      const [endX, endY] = main[i];
+      if (startY !== endY || Math.abs(y - startY) < 5) continue;
+      for (let x = Math.max(startX, nearX) + 4; x <= Math.min(endX, farX) - 4; x += 1) {
+        if (used.every(other => Math.abs(other - x) >= 5)) candidates.push({x, fromY: startY});
+      }
+    }
+    for (let i = 0; i < count && candidates.length; i += 1) {
+      const { x, fromY } = choose(candidates, random);
+      plan.push([[x, fromY], [x, y]]);
+      candidates = candidates.filter(candidate => Math.abs(candidate.x - x) >= 6);
+    }
+  }
+
   function carveCorridor(tiles, points, width, mapWidth) {
     const before = Math.floor((width - 1) / 2);
     const route = [];
@@ -170,7 +191,7 @@
   function createRooms(layout, depth, random) {
     const { tiles, roomsByTile, doorways, width: mapWidth } = layout;
     const rooms = [];
-    const count = choose([7, 8, 8, 9, 10], random) + depth;
+    const count = choose([7, 8, 8, 9, 10], random) + depth + Math.max(0, depth - 1);
     const hasLounge = random() < LOUNGE_CHANCE;
     for (const entry of roomEntrances(layout, random)) {
       const { x, y, outX, outY, hall, wall } = entry;
@@ -276,14 +297,17 @@
   }
 
   function createLayout(random, kind = choose(LAYOUTS, random), depth = 0) {
-    const width = WIDTH + 4 * depth;
-    const height = HEIGHT + 2 * depth;
+    const extra = Math.max(0, depth - 1);
+    const width = WIDTH + 4 * (depth + extra);
+    const height = HEIGHT + 2 * (depth + extra);
     const tiles = new Uint8Array(width * height).fill(WALL);
     const roomsByTile = new Int8Array(tiles.length).fill(-1);
     const doorways = new Uint8Array(tiles.length);
     const reflectX = random() < 0.5;
     const reflectY = random() < 0.5;
-    const centerlines = corridorPlan(kind, random, width, height).map(points => points.map(([x, y]) => [
+    const plan = corridorPlan(kind, random, width, height);
+    addCrossPassages(plan, extra, random);
+    const centerlines = plan.map(points => points.map(([x, y]) => [
       reflectX ? width - 1 - x : x,
       reflectY ? height - 1 - y : y,
     ]));
@@ -294,6 +318,30 @@
     sorted.forEach((room, index) => { room.number = index + 1; });
     const furniture = rooms.flatMap(room => furnishRoom(layout, room, random));
     return { ...layout, rooms, furniture };
+  }
+
+  function cameraMounts({tiles, roomsByTile, doorways, width, height}) {
+    const mounts = [];
+    const isHall = tile => tiles[tile] === 0 && roomsByTile[tile] === -1 && !doorways[tile];
+    for (let y = 2; y < height - 2; y += 1) {
+      for (let x = 2; x < width - 2; x += 1) {
+        if (!isHall(tileAt(x, y, width))) continue;
+        for (const [dx, dy] of [[0, -1], [1, 0], [0, 1], [-1, 0]]) {
+          if (!isWall(tiles, x + dx, y + dy, width)) continue;
+          for (const side of [-1, 1]) {
+            const tx = -dy * side;
+            const ty = dx * side;
+            if (!isHall(tileAt(x + tx, y + ty, width))) continue;
+            if (!isHall(tileAt(x + 2 * tx, y + 2 * ty, width))) continue;
+            mounts.push({
+              x: x + 0.5 + 0.34 * dx, y: y + 0.5 + 0.34 * dy,
+              heading: Math.atan2(ty - 0.57 * dy, tx - 0.57 * dx),
+            });
+          }
+        }
+      }
+    }
+    return mounts;
   }
 
   function placeRoomItems({ rooms, tiles, width, furniture }, homeRoomId, itemIds, random) {
@@ -323,7 +371,7 @@
 
   const map = {
     WIDTH, HEIGHT, WALL, FURNITURE, LAYOUTS, randomSource, choose, shuffle, tileAt, tileCenter,
-    isWall, isSolid, walkableTiles, createLayout, placeRoomItems,
+    isWall, isSolid, walkableTiles, createLayout, placeRoomItems, cameraMounts,
   };
   if (typeof module === 'object' && module.exports) module.exports = map;
   else root.DormMap = map;

@@ -44,8 +44,9 @@
   };
   const STEP = 1 / 60;
   const FULL_TURN = 2 * Math.PI;
-  const BEAM_SAMPLE_ANGLE = Math.PI / 60;
+  const BEAM_SAMPLE_ANGLE = Math.PI / 30;
   const LAYER_MAX_TILE_PIXELS = 64;
+  const LAYER_PIXEL_BUDGET = 4_000_000;
   const SCENE_PIXEL_BUDGET = 3_000_000;
   const GUARD_CUE_LIGHT = { range: 8, halfAngle: Math.PI, blocked: core.isSolid };
   const NEARBY_STAIR_SIGHT = { range: 2.4, halfAngle: Math.PI };
@@ -186,7 +187,7 @@
     screenTitle.textContent = view === 'escaped' ? '탈출 성공' : '붙잡혔습니다';
     screenDescription.textContent = view === 'escaped'
       ? '1층 출구를 통과했습니다.'
-      : `${game.floor.number}층에서 사감에게 붙잡혔습니다.`;
+      : `${game.floor.number}층에서 사감 선생님께 붙잡혔습니다.`;
     escapeTime.textContent = view === 'escaped' ? `소요 시간 ${formatDuration(finishedAt - startedAt)}` : '';
     escapeTime.hidden = view !== 'escaped';
     startButton.textContent = '5층부터 다시 시작';
@@ -203,7 +204,7 @@
     }
     const maximum = core.maxStamina(game);
     if (stamina.max !== maximum) stamina.max = maximum;
-    stamina.value = game.player.stamina;
+    if (stamina.value !== game.player.stamina) stamina.value = game.player.stamina;
     const percent = `${Math.floor(game.player.stamina / maximum * 100)}%`;
     if (staminaPercent.textContent !== percent) staminaPercent.textContent = percent;
     staminaPanel.toggleAttribute('data-exhausted', game.player.exhausted);
@@ -214,9 +215,10 @@
     fatigue.hidden = fatigueMessage === '';
 
     let status = '';
+    const detected = game.cameraAlertUntil > game.time ? 'CCTV에 발각됨' : '발각됨';
     const chased = game.floor.guards.some(guard => guard.mode === 'chase');
-    if (chased) status = '발각됨 · 추격 중';
-    else if (game.floor.guards.some(guard => guard.mode === 'search')) status = '발각됨 · 수색 중';
+    if (chased) status = `${detected} · 추격 중`;
+    else if (game.floor.guards.some(guard => guard.mode === 'search')) status = `${detected} · 수색 중`;
     const warning = !status && game.floor.guards.some(guard => guard.noticeTime > 0);
     if (warning) status = '발각 직전';
     hud.toggleAttribute('data-chase', chased);
@@ -526,6 +528,7 @@
     target.scale(tilePixels, tilePixels);
     drawFloor(target, floor);
     for (const object of floor.furniture) drawFurniture(target, object);
+    drawRoomLabels(target, floor);
     return {
       floor, layer, tilePixels,
       wallCorners: obstacleCorners(floor, core.isWall),
@@ -558,22 +561,20 @@
     context.restore();
   }
 
-  function drawRoomLabels(floor, player) {
-    const range = core.PLAYER_LIGHT.range + 1;
-    context.font = `700 0.25px ${GAME_FONT}`;
-    context.textAlign = 'center';
-    context.textBaseline = 'middle';
-    context.fillStyle = '#c9ccae';
+  function drawRoomLabels(target, floor) {
+    target.font = `700 0.25px ${GAME_FONT}`;
+    target.textAlign = 'center';
+    target.textBaseline = 'middle';
+    target.fillStyle = '#c9ccae';
     for (const room of floor.rooms) {
       const first = core.tileCenter(room.entrance.wall[0], floor.width);
       const last = core.tileCenter(room.entrance.wall[1], floor.width);
       const x = (first.x + last.x) / 2;
       const y = (first.y + last.y) / 2;
-      if (Math.abs(x - player.x) > range || Math.abs(y - player.y) > range) continue;
       let label = `${floor.number * 100 + room.number}호`;
       if (room.lounge) label = '휴게실';
       else if (room.id === floor.homeRoomId) label = '내 방';
-      context.fillText(label, x, y);
+      target.fillText(label, x, y);
     }
   }
 
@@ -791,14 +792,40 @@
     }
   }
 
-  function drawGuardCues(floor, player, lamps) {
-    const observer = { x: player.x, y: player.y, angle: 0 };
-    const sight = beamPath(floor, observer, GUARD_CUE_LIGHT);
+  function drawCameraScans(cameras) {
+    for (const { beam, triggered } of cameras) {
+      if (!beam) continue;
+      context.fillStyle = triggered ? '#da655364' : '#5fbab747';
+      context.fill(beam);
+      context.strokeStyle = triggered ? '#f7836b88' : '#87d5d270';
+      context.lineWidth = 0.025;
+      context.stroke(beam);
+    }
+  }
+
+  function drawCameras(cameras) {
+    for (const { x, y, angle, beam, triggered, nearby } of cameras) {
+      if (!nearby) continue;
+      context.save();
+      context.translate(x, y);
+      context.rotate(angle);
+      context.fillStyle = '#091515';
+      context.fillRect(-0.21, -0.13, 0.46, 0.26);
+      context.fillStyle = '#6d827f';
+      context.fillRect(-0.16, -0.09, 0.3, 0.18);
+      context.fillStyle = triggered ? '#ffa18e' : beam ? '#a3e7de' : '#475653';
+      context.fillRect(0.14, -0.065, 0.1, 0.13);
+      context.restore();
+    }
+  }
+
+  function drawNearbyLights(floor, player, sight, lamps, cameras) {
     context.save();
     context.clip(sight);
     context.globalAlpha = 0.32;
     drawGuardLamps(lamps);
 
+    drawCameraScans(cameras);
     context.globalAlpha = 0.82;
     context.fillStyle = '#ffdda1';
     for (const { guard } of lamps) {
@@ -807,7 +834,7 @@
         x: guard.x + Math.cos(guard.angle) * core.GUARD_RADIUS,
         y: guard.y + Math.sin(guard.angle) * core.GUARD_RADIUS,
       };
-      if (!core.seesTarget(floor.tiles, observer, source, GUARD_CUE_LIGHT, floor.width)) continue;
+      if (!core.seesTarget(floor.tiles, player, source, GUARD_CUE_LIGHT, floor.width)) continue;
       context.beginPath();
       context.arc(source.x, source.y, 0.067, 0, FULL_TURN);
       context.fill();
@@ -895,7 +922,8 @@
     )) : floor.guards;
     const intro = view === 'start';
     const scale = Math.max(24, Math.min(68, width / 19, height / 12));
-    const tilePixels = Math.min(LAYER_MAX_TILE_PIXELS, Math.ceil(scale * pixelRatio));
+    const layerLimit = Math.floor(Math.sqrt(LAYER_PIXEL_BUDGET / (floor.width * floor.height)));
+    const tilePixels = Math.min(LAYER_MAX_TILE_PIXELS, Math.ceil(scale * pixelRatio), layerLimit);
     if (sceneLayer?.floor !== floor || sceneLayer.tilePixels !== tilePixels) sceneLayer = buildSceneLayer(floor, tilePixels);
     const focusX = intro ? width * 0.74 : width / 2;
     const focusY = intro ? height * 0.55 : height / 2;
@@ -922,14 +950,35 @@
       if (Math.hypot(guard.x - player.x, guard.y - player.y) > cueRange + light.range) continue;
       lamps.push(createGuardLamp(floor, guard, light));
     }
-    if (!intro && lamps.length > 0) drawGuardCues(floor, player, lamps);
-
     const playerLight = core.playerLight(game);
-    const playerBeam = beamPath(floor, player, playerLight);
+    const cached = sceneLayer.playerPaths;
+    if (!cached || cached.x !== player.x || cached.y !== player.y || cached.angle !== player.angle || cached.light !== playerLight) {
+      sceneLayer.playerPaths = { x: player.x, y: player.y, angle: player.angle, light: playerLight, beam: beamPath(floor, player, playerLight) };
+    }
+    const paths = sceneLayer.playerPaths;
+    const playerBeam = paths.beam;
+    const cameras = [];
+    const cameraTime = previousPose ? game.time - STEP * (1 - fraction) : game.time;
+    const scan = core.CAMERA_SCAN;
+    const enabled = floor.empUntil <= game.time;
+    for (const camera of floor.cameras) {
+      if (Math.hypot(camera.x - player.x, camera.y - player.y) > cueRange + scan.range) continue;
+      const pose = { x: camera.x, y: camera.y, angle: core.cameraAngle(camera, cameraTime) };
+      cameras.push({
+        ...pose,
+        beam: enabled ? beamPath(floor, pose, scan) : null,
+        triggered: game.alertCamera === camera && game.cameraAlertUntil > game.time,
+        nearby: core.seesTarget(floor.tiles, player, camera, GUARD_CUE_LIGHT, floor.width),
+      });
+    }
+    if (!intro && (lamps.length || cameras.some(camera => camera.beam))) {
+      paths.sight ??= beamPath(floor, player, GUARD_CUE_LIGHT);
+      drawNearbyLights(floor, player, paths.sight, lamps, cameras);
+    }
+
     context.save();
     context.clip(playerBeam);
     drawSceneLayer(player);
-    drawRoomLabels(floor, player);
 
     const light = context.createRadialGradient(player.x, player.y, 0.1, player.x, player.y, playerLight.range);
     const circularLight = playerLight.halfAngle === Math.PI;
@@ -939,6 +988,7 @@
     context.fillStyle = light;
     context.fill(playerBeam);
     drawGuardLamps(lamps);
+    drawCameraScans(cameras);
     if (!intro) {
       drawCrumbs(floor, player, playerLight.range);
       for (const item of floor.pickups) {
@@ -960,6 +1010,7 @@
     drawStairSign(floor, player, playerBeam, floor.goalTile, floor.number === 1 ? 'exit' : 'down');
     drawStairSign(floor, player, playerBeam, floor.upTile, 'up');
     drawItemRoute();
+    drawCameras(cameras);
     if (nearbyPickup) drawGroundItem(nearbyPickup, true);
     if (!intro && !dialogue.active) drawPlayerEffects(player);
     drawActor(player, core.PLAYER_RADIUS, '#a6c3ac', '#d0e4c8', '#fff0b7');
@@ -1067,6 +1118,9 @@
     if (view === 'playing' && event.detail > 0) soundToggle.blur();
   });
   resize();
-  document.fonts.load('20px LeeSeoyun').then(() => { dirty = true; }, () => {});
+  document.fonts.load('20px LeeSeoyun').then(() => {
+    sceneLayer = null;
+    dirty = true;
+  }, () => {});
   requestAnimationFrame(frame);
 })();

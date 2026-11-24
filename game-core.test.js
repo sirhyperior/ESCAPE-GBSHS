@@ -75,12 +75,14 @@ test('1,600 seeded floors have wide, connected corridors and furnished dorm room
       const floor = core.createFloor(number, seed);
       const { width, height } = floor;
       const depth = 5 - number;
+      const extra = Math.max(0, depth - 1);
       const { distance } = core.walkableTiles(floor.tiles, floor.spawnTile, -1, width);
       kinds.add(floor.kind);
-      assert.equal(width, 43 + 4 * depth);
-      assert.equal(height, 31 + 2 * depth);
+      assert.equal(width, 43 + 4 * (depth + extra));
+      assert.equal(height, 31 + 2 * (depth + extra));
       assert.equal(floor.tiles.length, width * height);
-      assert.ok(floor.rooms.length >= 6 && floor.rooms.length <= 10 + depth);
+      assert.ok(floor.rooms.length >= 6 && floor.rooms.length <= 10 + depth + extra);
+      assert.equal(floor.routes.length, (floor.kind === 'dogleg' ? 2 : 4) + extra);
       assert.ok(floor.tiles.every((value, tile) => value !== 0 || distance[tile] >= 0));
       assert.ok(distance[floor.goalTile] >= 26);
       assert.ok(floor.goalTiles.every(tile => floor.roomsByTile[tile] === -1 && distance[tile] >= 0));
@@ -96,6 +98,22 @@ test('1,600 seeded floors have wide, connected corridors and furnished dorm room
         assert.equal(floor.roomsByTile[floor.upTile], -1);
         assert.ok(distance[floor.upTile] >= 0);
         assert.ok(!floor.goalTiles.includes(floor.upTile));
+      }
+
+      assert.equal(floor.cameras.length, [0, 6, 4, 2, 0, 0][number]);
+      if (floor.cameras.length) {
+        const uncovered = floor.tiles.slice();
+        uncovered[floor.upTile] = map.WALL;
+        for (const camera of floor.cameras) {
+          const tile = core.tileAt(camera.x, camera.y, width);
+          assert.equal(floor.tiles[tile], 0);
+          assert.equal(floor.roomsByTile[tile], -1);
+          assert.equal(floor.doorways[tile], 0);
+          for (const scanned of core.cameraSweepTiles(floor, camera)) uncovered[scanned] = map.WALL;
+        }
+        assert.equal(uncovered[floor.spawnTile], 0);
+        const { distance } = core.walkableTiles(uncovered, floor.spawnTile, -1, width);
+        assert.ok(floor.goalTiles.some(tile => distance[tile] >= 0), `camera-free route on floor ${number}, seed ${seed}`);
       }
 
       const [main, ...sideRoutes] = floor.routes;
@@ -180,6 +198,7 @@ test('1,600 seeded floors have wide, connected corridors and furnished dorm room
   assert.deepEqual(itemIds, new Set(Object.keys(items)));
   assert.deepEqual(core.createFloor(5, 1).tiles, core.createFloor(5, 1).tiles);
   assert.deepEqual(core.createFloor(4, 3).pickups, core.createFloor(4, 3).pickups);
+  assert.deepEqual(core.createFloor(1, 3).cameras, core.createFloor(1, 3).cameras);
   assert.notDeepEqual(core.createFloor(5, 1).tiles, core.createFloor(5, 2).tiles);
 });
 
@@ -375,6 +394,36 @@ test('breaking sight during the 0.75-second warning resets detection', () => {
   tick(game, 1);
   assert.equal(guard.mode, 'chase');
   assert.equal(guard.noticeTime, 0);
+});
+
+test('CCTV cannot see through walls and alerts the closest guard the instant the player touches its sweep', () => {
+  const game = openFloor();
+  const { floor, player } = game;
+  const camera = { x: 6.5, y: 8.5, heading: 0, phase: 0 };
+  floor.cameras = [camera];
+  const [near, far] = core.createFloor(4, 0).guards;
+  for (const [guard, x] of [[near, 12.5], [far, 19.5]]) {
+    Object.assign(guard, { x, y: 8.5, angle: 0, lookTime: 10 });
+  }
+  floor.guards = [far, near];
+  Object.assign(player, { x: 9.5, y: 8.5 });
+  const wall = core.tileAt(8, 8);
+  floor.tiles[wall] = map.WALL;
+  tick(game, 1);
+  assert.equal(near.mode, 'patrol');
+  assert.equal(game.alertCamera, null);
+
+  floor.tiles[wall] = 0;
+  const angle = core.cameraAngle(camera, game.time + STEP);
+  const edge = angle + core.CAMERA_SCAN.halfAngle + 0.07;
+  Object.assign(player, { x: camera.x + 3 * Math.cos(edge), y: camera.y + 3 * Math.sin(edge) });
+  assert.equal(core.seesTarget(floor.tiles, { ...camera, angle }, player, core.CAMERA_SCAN), false);
+  tick(game, 1);
+  assert.equal(game.alertCamera, camera);
+  assert.equal(near.mode, 'chase');
+  assert.deepEqual(near.lastSeen, { x: player.x, y: player.y });
+  assert.equal(far.mode, 'patrol');
+  assert.notEqual(core.cameraAngle(camera, 1), core.cameraAngle(camera, 0));
 });
 
 test('sight expands on detection and each guard clears its alert after 2.5 continuous seconds', () => {
@@ -593,14 +642,14 @@ test('guards patrol and pursue progressively faster on the bottom three floors',
   }
 });
 
-test('waiting for patrols and taking side passages can clear all five floors unseen', () => {
+test('waiting for patrols and taking side passages can clear all five floors without setting off a chase', () => {
   // One seed with a keyboard route of up, down, left, right and wait, one tile per symbol.
   const routes = [
     'UUUULLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLDDDL',
     'URRRRRRRRRRRRRRRRRRRRUR...U.R..LDDRRRRRRRUUUUUUUUUUUURRRRRRRRR',
-    'ULLLLLLLLLLUUUL.DDDLLLLLLLLLLLLLLLLLLUUUUUUUUULLLLLLLLLLLDDDDDDDDDL',
-    'DRRRRRRRRRRRRRRRRRRRRRRRRDDDDDDDDDDDDDDDDRRRRRRRRRRRRRRRRRRRRR',
-    'ULLLLLLLUUUUUUUUUUUUUUUUULLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL.URDDLLL',
+    'UUUDDDDRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRDDDUDURUUURRRRRRRRRRRRR',
+    'UDUDUDUDUDUDUDUDUDUDUDUDUDUDUDUDUDUDDRRRRRRRRRRRRRRRRRRRRRRRRRRRRDDDDDDUDDDDDRRRRRRRRRRRRRRRRRRRDDDDDDDDDRDRRRRR',
+    'UDUDUDDLLLLLLLLLLDUUUUUUUUUUUUUUUUUUUUUUUUUUUDULLLL.LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL',
   ];
   const movements = { U: [0, -1], D: [0, 1], L: [-1, 0], R: [1, 0], '.': [0, 0] };
   const game = core.createGame(0);
@@ -610,15 +659,15 @@ test('waiting for patrols and taking side passages can clear all five floors uns
     assert.equal(floor.number, 5 - index);
     kinds.add(floor.kind);
     const [main, bypass] = floor.routes;
-    const approach = (index === 0 || index === 2 ? bypass : main).at(floor.goalTile === main[0] ? 2 : -3);
-    const approachTiles = index === 0 || index === 2 ? [approach, approach + 1] :
+    const approach = (index === 0 ? bypass : main).at(floor.goalTile === main[0] ? 2 : -3);
+    const approachTiles = index === 0 ? [approach, approach + 1] :
       [approach - floor.width, approach, approach + floor.width];
     let usedApproach = false;
     for (const action of route) {
       const [x, y] = movements[action];
       for (let frame = 0; frame < 20 && game.floor === floor && game.phase === 'playing'; frame += 1) {
         core.step(game, {x, y, sprint: false}, STEP);
-        assert.ok(floor.guards.every(guard => guard.mode === 'patrol'));
+        assert.ok(floor.guards.every(guard => guard.mode === 'patrol' && guard.noticeTime === 0));
         usedApproach ||= game.floor === floor && approachTiles.includes(core.tileAt(game.player.x, game.player.y, floor.width));
       }
     }
@@ -859,6 +908,8 @@ test('EMP clears detection and disables every guard light on the current floor f
   setPatrolHall(floor, 8, 25, 10);
   const [near, far] = core.createFloor(4, 0).guards;
   Object.assign(player, { x: 14.5, y: 10.5 });
+  floor.cameras = [{ x: 13.5, y: 10.5, heading: 0, phase: 0 }];
+  assert.equal(core.cameraSeesPlayer(floor, floor.cameras[0], player, game.time + STEP), true);
   Object.assign(near, { x: 14.5, y: 10.5, angle: 0, mode: 'chase' });
   Object.assign(far, { x: 22.5, y: 10.5, angle: Math.PI, noticeTime: 0.6, lookTime: 10 });
   floor.guards = [near, far];
@@ -866,6 +917,7 @@ test('EMP clears detection and disables every guard light on the current floor f
   const otherFloor = core.createFloor(4, 0);
   tick(game, 1, { ...IDLE, interact: true });
   assert.equal(game.phase, 'playing');
+  assert.equal(game.alertCamera, null);
   assert.equal(inventory.active, null);
   assert.ok(floor.guards.every(guard => guard.mode === 'patrol' && guard.noticeTime === 0));
   assert.ok(otherFloor.guards.every(guard => core.guardLight(guard, otherFloor, game.time)));

@@ -33,7 +33,7 @@
       type: 'active',
       consumable: true,
       description: '누군가 집에서 가져온 비비탄총. 총알은 하나밖에 없지만 맞으면 아플 것 같다.',
-      feedback: { color: '#ffd288', stun: '발각 해제 · 사감 정지' },
+      feedback: { color: '#ffd288', stun: '사감 선생님께서 멈추셨습니다' },
       palette: { o: '#252427', d: '#65616b', s: '#b4acad', r: '#ff9b52' },
       pixels: [
         '............', '............', '.....o...o..', '..ossssssor.',
@@ -83,7 +83,7 @@
       type: 'active',
       consumable: true,
       description: '주위에 있는 전자기기들이 꺼진다. 왜 이게 기숙사에 있는지는 아무도 모른다...',
-      feedback: { color: '#8de5d8', blackout: '사감 손전등 차단' },
+      feedback: { color: '#8de5d8', blackout: '손전등·CCTV 일시 정지' },
       palette: { o: '#22282a', d: '#59656a', s: '#9ea8a3', b: '#7fe0e3' },
       pixels: [
         '............', '........so..', '........do..', '..ooooo.do..',

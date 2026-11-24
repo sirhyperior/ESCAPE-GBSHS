@@ -5,13 +5,14 @@
   const items = typeof module === 'object' && module.exports ? require('./game-items.js') : root.DormItems;
   const {
     WIDTH, HEIGHT, WALL, LAYOUTS, randomSource, choose, shuffle, tileAt, tileCenter,
-    isWall, isSolid, walkableTiles, createLayout, placeRoomItems,
+    isWall, isSolid, walkableTiles, createLayout, placeRoomItems, cameraMounts,
   } = map;
   const MIN_ROUTE = 26;
   const MIN_GUARD_DISTANCE = 12;
   const GUARD_SPAWN_SPACING = 7;
   const STAIR_PATROL_CLEARANCE = 3;
   const GUARD_COUNTS = [0, 4, 3, 3, 2, 1];
+  const CAMERA_COUNTS = [0, 6, 4, 2, 0, 0];
   const PLAYER_RADIUS = 0.25;
   const GUARD_RADIUS = 0.24;
   const WALK_SPEED = 3;
@@ -37,6 +38,61 @@
   const NIGHT_VISION_LIGHT = Object.freeze({ ...PLAYER_LIGHT, halfAngle: Math.PI });
   const PATROL_LIGHT = Object.freeze({ range: 6.5, halfAngle: 55 * Math.PI / 180, blocked: isSolid });
   const CHASE_LIGHT = Object.freeze({ range: 8.25, halfAngle: 70 * Math.PI / 180, blocked: isSolid });
+  const CAMERA_SCAN = Object.freeze({ range: 3.8, halfAngle: Math.PI / 11, blocked: isSolid });
+  const CAMERA_SWEEP = 0.57;
+  const CAMERA_TURN_RATE = 2 * Math.PI / 6.8;
+
+  function cameraAngle(camera, time) {
+    return camera.heading + CAMERA_SWEEP * Math.sin(camera.phase + time * CAMERA_TURN_RATE);
+  }
+
+  function cameraSweepTiles(floor, camera) {
+    const { tiles, width } = floor;
+    // Each point between neighboring tile centers is at most half a tile from one of them.
+    const margin = 0.5 + PLAYER_RADIUS;
+    const reach = CAMERA_SCAN.range + margin;
+    const swept = [];
+    for (let y = Math.floor(camera.y - reach); y <= Math.floor(camera.y + reach); y += 1) {
+      for (let x = Math.floor(camera.x - reach); x <= Math.floor(camera.x + reach); x += 1) {
+        if (isSolid(tiles, x, y, width)) continue;
+        const dx = x + 0.5 - camera.x;
+        const dy = y + 0.5 - camera.y;
+        const distance = Math.hypot(dx, dy);
+        if (distance > reach) continue;
+        const difference = Math.atan2(dy, dx) - camera.heading;
+        const offset = Math.abs(Math.atan2(Math.sin(difference), Math.cos(difference)));
+        if (distance <= margin || offset <= CAMERA_SWEEP + CAMERA_SCAN.halfAngle + Math.asin(margin / distance)) {
+          swept.push(tileAt(x, y, width));
+        }
+      }
+    }
+    return swept;
+  }
+
+  function placeCameras(floor, random) {
+    const count = CAMERA_COUNTS[floor.number];
+    if (!count) return [];
+    const { tiles, width, spawnTile, upTile, goalTile, goalTiles } = floor;
+    const stairs = [upTile, goalTile].map(tile => tileCenter(tile, width));
+    const open = tiles.slice();
+    open[upTile] = WALL;
+    const cameras = [];
+    for (const mount of shuffle(cameraMounts(floor), random)) {
+      if (stairs.some(stair => Math.hypot(mount.x - stair.x, mount.y - stair.y) < 6)) continue;
+      if (cameras.some(camera => Math.hypot(mount.x - camera.x, mount.y - camera.y) < 6)) continue;
+
+      const swept = cameraSweepTiles(floor, mount).filter(tile => open[tile] === 0);
+      for (const tile of swept) open[tile] = WALL;
+      const { distance } = walkableTiles(open, spawnTile, -1, width);
+      if (goalTiles.some(tile => distance[tile] >= 0)) {
+        cameras.push({ ...mount, phase: random() * 2 * Math.PI });
+        if (cameras.length === count) break;
+      } else {
+        for (const tile of swept) open[tile] = 0;
+      }
+    }
+    return cameras;
+  }
 
   function corridorLinks(routes, stairTiles, width) {
     const stairs = stairTiles.map(tile => tileCenter(tile, width));
@@ -116,6 +172,7 @@
       crumbs: new Map(),
       empUntil: 0,
     };
+    floor.cameras = placeCameras(floor, randomSource(seed ^ 0x62a3fb71));
 
     const distance = walkableTiles(tiles, spawnTile, -1, width).distance;
     const exit = tileCenter(goalTile, width);
@@ -194,6 +251,8 @@
     game.crumbDistance = 0;
     game.dismissedPickup = null;
     game.shot = null;
+    game.alertCamera = null;
+    game.cameraAlertUntil = 0;
   }
 
   function createGame(seed) {
@@ -278,6 +337,43 @@
     const facing = dx * Math.cos(actor.angle) + dy * Math.sin(actor.angle);
     return facing >= Math.cos(light.halfAngle) - EPSILON &&
       castRay(tiles, actor.x, actor.y, dx, dy, distance, light.blocked, width) >= distance - EPSILON;
+  }
+
+  function cameraSeesPlayer(floor, camera, player, time) {
+    const x = player.x - camera.x;
+    const y = player.y - camera.y;
+    const reach = CAMERA_SCAN.range + PLAYER_RADIUS;
+    if (x * x + y * y > reach * reach) return false;
+
+    const heading = cameraAngle(camera, time);
+    const difference = Math.atan2(y, x) - heading;
+    const relative = Math.atan2(Math.sin(difference), Math.cos(difference));
+    const angle = heading + Math.max(-CAMERA_SCAN.halfAngle, Math.min(CAMERA_SCAN.halfAngle, relative));
+    const dx = Math.cos(angle);
+    const dy = Math.sin(angle);
+    const distance = Math.max(0, Math.min(CAMERA_SCAN.range, x * dx + y * dy));
+    if ((x - dx * distance) ** 2 + (y - dy * distance) ** 2 > PLAYER_RADIUS ** 2 + EPSILON) return false;
+    return castRay(floor.tiles, camera.x, camera.y, dx, dy, distance, isSolid, floor.width) >= distance - EPSILON;
+  }
+
+  function cameraGuard(game) {
+    const { floor, player, time } = game;
+    const camera = floor.cameras.find(camera => cameraSeesPlayer(floor, camera, player, time));
+    if (!camera) return null;
+    let nearest = null;
+    let bestDistance = Infinity;
+    for (const guard of floor.guards) {
+      if (effectActive(guard.stunnedUntil, time)) continue;
+      const distance = Math.hypot(guard.x - player.x, guard.y - player.y);
+      if (distance >= bestDistance) continue;
+      bestDistance = distance;
+      nearest = guard;
+    }
+    if (nearest) {
+      game.alertCamera = camera;
+      game.cameraAlertUntil = time + 1.1;
+    }
+    return nearest;
   }
 
   function canStand({tiles, width}, x, y, radius) {
@@ -542,6 +638,7 @@
       case 'emp':
         floor.empUntil = time + 4;
         clearAlert(floor);
+        game.cameraAlertUntil = 0;
         feedback = { key: 'blackout', until: floor.empUntil, floorNumber: floor.number };
         break;
       default:
@@ -664,11 +761,11 @@
     guard.angle += Math.sign(shortest) * Math.min(Math.abs(shortest), speed * dt);
   }
 
-  function updateGuard(floor, guard, player, light, dt) {
-    const visible = light && seesTarget(floor.tiles, guard, player, light, floor.width);
+  function updateGuard(floor, guard, player, light, dt, tracked) {
+    const visible = tracked || (light && seesTarget(floor.tiles, guard, player, light, floor.width));
     if (guard.mode === 'patrol') {
       guard.noticeTime = visible ? guard.noticeTime + dt : 0;
-      if (visible && guard.noticeTime < NOTICE_TIME - EPSILON) {
+      if (visible && !tracked && guard.noticeTime < NOTICE_TIME - EPSILON) {
         guard.targetAngle = Math.atan2(player.y - guard.y, player.x - guard.x);
         turnGuard(guard, dt);
         return;
@@ -724,10 +821,11 @@
 
     const inHome = floor.homeRoomId !== null && floor.roomsByTile[tile] === floor.homeRoomId;
     if (inHome) clearAlert(floor);
+    const tracked = !inHome && !effectActive(floor.empUntil, time) ? cameraGuard(game) : null;
     for (const guard of floor.guards) {
       if (effectActive(guard.stunnedUntil, time)) continue;
       const light = inHome ? null : guardLight(guard, floor, time);
-      updateGuard(floor, guard, player, light, dt);
+      updateGuard(floor, guard, player, light, dt, tracked === guard);
       if (light && Math.hypot(player.x - guard.x, player.y - guard.y) <= PLAYER_RADIUS + GUARD_RADIUS) {
         game.phase = 'caught';
         return;
@@ -736,8 +834,9 @@
   }
 
   const core = {
-    WIDTH, HEIGHT, PLAYER_RADIUS, GUARD_RADIUS, MAX_STAMINA, PLAYER_LIGHT, SHOT_DURATION,
+    WIDTH, HEIGHT, PLAYER_RADIUS, GUARD_RADIUS, MAX_STAMINA, PLAYER_LIGHT, SHOT_DURATION, CAMERA_SCAN,
     createFloor, createGame, step, guardLight, playerLight, maxStamina, nearbyItem, hasItemRoute, itemRoute, heldItem,
+    cameraAngle, cameraSeesPlayer, cameraSweepTiles,
     isWall, isSolid, tileAt, tileCenter, walkableTiles, castRay, seesTarget,
   };
 
